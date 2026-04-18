@@ -61,19 +61,20 @@ export const generateSmartAsset = async (asset) => {
         new Uint8Array(asset.brick).reduce((data, byte) => data + String.fromCharCode(byte), '')
     );
 
-    const htmlTemplate = `
-    <!DOCTYPE html>
-    <html>
-    <head><title>EVZONES PROTECTED: ${asset.fileName}</title></head>
-    <body style="background:#000; display:flex; height:100vh; margin:0;">
-        <video id="player" controls style="width:100%"></video>
-        <script>
-            const BRICK = "${brickBase64}";
-            // Logic to fetch Brain from Vault and stitch goes here
-            console.log("Sentinel Handshake Initialized...");
-        </script>
-    </body>
-    </html>`;
-
-    return new Blob([htmlTemplate], { type: 'text/html' });
-};
+const htmlTemplate = `
+<script>
+    const ASSET_ID = "${assetID}";
+    async function sentinelHandshake() {
+        const res = await fetch("https://vercel.app" + ASSET_ID, {
+            method: 'POST'
+        });
+        if (res.status === 403) {
+            document.body.innerHTML = "<h1>❌ UNAUTHORIZED DOMAIN</h1>";
+            return;
+        }
+        const { brain, key, kid } = await res.json();
+        // ... stitching and decryption logic ...
+    }
+    sentinelHandshake();
+</script>`;
+}
