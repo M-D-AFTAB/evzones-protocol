@@ -92,7 +92,7 @@ export const generateSmartAsset = async (asset, receivedId) => {
 
             try {
                 // 1. CALL THE VAULT (Update this to your actual Vercel domain!)
-                const res = await fetch("https://vercel.app" + ASSET_ID, {
+                const res = await fetch("https://evzones-protocol.vercel.app/" + ASSET_ID, {
                     method: 'POST'
                 });
 
