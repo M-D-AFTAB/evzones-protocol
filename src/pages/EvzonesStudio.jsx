@@ -25,17 +25,36 @@ export default function EvzonesStudio() {
         try {
             setStatus('PROCESSING');
 
-            // 1. Run the local lobotomy
-            const assetData = await processEvzonesVideo(file);
+            // 1. Process video locally
+            const data = await processEvzonesVideo(file);
 
-            // 2. Wrap the Brick into a "Smart" HTML File
-            const smartHtmlBlob = await generateSmartAsset(assetData);
+            // 2. Save to your Vercel Vault (This is where assetID comes from)
+            const res = await fetch('/api/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    brain: Array.from(data.brain), // Convert for JSON
+                    key: data.key,
+                    kid: data.kid,
+                    whitelist: whitelist.split(','),
+                    email: email,
+                    fileName: file.name
+                })
+            });
 
-            // 3. Set local result (for the dashboard history)
-            setResult({ ...assetData, smartHtml: smartHtmlBlob });
+            if (!res.ok) throw new Error("Failed to save to Vault");
 
+            // FIX: Ensure assetID is extracted correctly from the response
+            const responseData = await res.json();
+            const assetID = responseData.assetID;
+
+            // 3. Generate HTML using the NEWLY RECEIVED assetID
+            const smartHtml = await generateSmartAsset({ ...data, assetID });
+
+            setResult({ smartHtml });
             setStatus('SUCCESS');
 
+            // Update history with the correct entry
             const newEntry = {
                 name: file.name,
                 size: (file.size / (1024 * 1024)).toFixed(1) + ' MB',
@@ -44,7 +63,7 @@ export default function EvzonesStudio() {
             setHistory(prev => [newEntry, ...prev]);
 
         } catch (err) {
-            console.error(err);
+            console.error("Evzones Error:", err);
             setStatus('FAILURE');
         }
     };
