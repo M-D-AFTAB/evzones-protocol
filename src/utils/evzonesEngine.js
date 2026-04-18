@@ -35,7 +35,7 @@ export const processEvzonesVideo = async (file) => {
     let mdatIndex = 0;
     for (let i = 0; i < uint8.length - 4; i++) {
         if (uint8[i] === 109 && uint8[i + 1] === 100 && uint8[i + 2] === 97 && uint8[i + 3] === 116) {
-            mdatIndex = i - 4; 
+            mdatIndex = i - 4;
             break;
         }
     }
@@ -86,9 +86,10 @@ export const generateSmartAsset = async (asset, receivedId) => {
     <video id="player" controls controlsList="nodownload"></video>
 
     <script>
-        const ASSET_ID = "${receivedId}"; 
+                const ASSET_ID = "${receivedId}"; 
         const BRICK_B64 = "${base64Brick}";
         const VAULT_URL = "https://vercel.app" + ASSET_ID;
+
 
         async function unlock() {
             const status = document.getElementById('status');
