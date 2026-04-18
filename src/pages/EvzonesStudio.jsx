@@ -19,21 +19,21 @@ export default function EvzonesStudio() {
     const [result, setResult] = useState(null);
     const [history, setHistory] = useState([]);
 
-    const handleShieldAsset = async () => {
-        if (!file || !whitelist || !email) return alert("All fields are required.");
+    // Inside EvzonesStudio.jsx -> handleShieldAsset function
 
+    const handleShieldAsset = async () => {
         try {
             setStatus('PROCESSING');
 
-            // 1. Process video locally
+            // 1. Local Processing
             const data = await processEvzonesVideo(file);
 
-            // 2. Save to your Vercel Vault (This is where assetID comes from)
+            // 2. Save to Vercel Vault
             const res = await fetch('/api/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    brain: Array.from(data.brain), // Convert for JSON
+                    brain: Array.from(data.brain),
                     key: data.key,
                     kid: data.kid,
                     whitelist: whitelist.split(','),
@@ -42,31 +42,27 @@ export default function EvzonesStudio() {
                 })
             });
 
-            if (!res.ok) throw new Error("Failed to save to Vault");
-
-            // FIX: Ensure assetID is extracted correctly from the response
             const responseData = await res.json();
-            const assetID = responseData.assetID;
 
-            // 3. Generate HTML using the NEWLY RECEIVED assetID
-            const smartHtml = await generateSmartAsset({ ...data, assetID });
+            // CRITICAL: Extract the ID correctly
+            const receivedAssetID = responseData.assetID;
+
+            // 3. Generate HTML - Passing the ID into the object
+            const smartHtml = await generateSmartAsset({
+                ...data,
+                assetID: receivedAssetID
+            });
 
             setResult({ smartHtml });
             setStatus('SUCCESS');
 
-            // Update history with the correct entry
-            const newEntry = {
-                name: file.name,
-                size: (file.size / (1024 * 1024)).toFixed(1) + ' MB',
-                time: new Date().toLocaleTimeString('en-GB')
-            };
-            setHistory(prev => [newEntry, ...prev]);
-
+            // ... rest of your history logic
         } catch (err) {
-            console.error("Evzones Error:", err);
+            console.error(err);
             setStatus('FAILURE');
         }
     };
+
 
     return (
         <div className="sentinel-wrapper">
