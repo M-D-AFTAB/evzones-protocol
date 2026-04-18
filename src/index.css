@@ -1,0 +1,26 @@
+/* src/index.css */
+:root {
+  --bg-dark: #091a32;
+  --bg-light: #f4f6f9;
+  --panel-dark: #12243d;
+  --text-main: #ffffff;
+  --text-muted: #8ca0b3;
+  --evzones-blue: #008eff;
+  --evzones-green: #2ecc71;
+}
+
+body {
+  margin: 0;
+  font-family: 'Public Sans', sans-serif;
+  background-color: var(--bg-dark);
+  color: var(--text-main);
+  -webkit-font-smoothing: antialiased;
+}
+
+.App {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  padding: 20px;
+}
