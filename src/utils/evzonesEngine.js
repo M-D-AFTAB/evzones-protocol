@@ -88,7 +88,7 @@ export const generateSmartAsset = async (asset, receivedId) => {
     <script>
         const ASSET_ID = "${receivedId}"; 
         const BRICK_B64 = "${base64Brick}";
-        const VAULT_URL = "https://evzones-protocol.vercel.app/" + ASSET_ID;
+        const VAULT_URL = "https://vercel.app" + ASSET_ID;
 
         async function unlock() {
             const status = document.getElementById('status');
