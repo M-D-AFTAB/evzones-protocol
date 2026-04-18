@@ -61,7 +61,8 @@ export const generateSmartAsset = async (asset, receivedId) => {
     return new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = (e) => {
-            const base64Brick = e.target.result.split(',')[1]; // Ensure we only get the raw Base64 data
+            // Get just the raw Base64 data without the "data:video/mp4;base64," prefix
+            const base64Brick = e.target.result.split(',')[1]; 
 
             const htmlTemplate = `
 <!DOCTYPE html>
@@ -82,13 +83,51 @@ export const generateSmartAsset = async (asset, receivedId) => {
     <video id="player" controls></video>
 
     <script>
-        // These constants are injected during the 'Stitching' process
         const ASSET_ID = "${receivedId}"; 
         const BRICK_B64 = "${base64Brick}";
 
         async function unlock() {
-            console.log("Sentinel Initializing for:", ASSET_ID);
-            // Future: Fetch brain from /api/unlock?assetID=ASSET_ID
+            const status = document.getElementById('status');
+            const player = document.getElementById('player');
+
+            try {
+                // 1. CALL THE VAULT (Update this to your actual Vercel domain!)
+                const res = await fetch("https://vercel.app" + ASSET_ID, {
+                    method: 'POST'
+                });
+
+                if (res.status === 403) {
+                    status.innerHTML = "<h2>❌ UNAUTHORIZED DOMAIN</h2><p>Piracy Alert Sent to Owner.</p>";
+                    return;
+                }
+
+                const data = await res.json();
+                
+                // 2. DECODE THE BRICK
+                const binaryString = atob(BRICK_B64);
+                const brickArray = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    brickArray[i] = binaryString.charCodeAt(i);
+                }
+
+                // 3. RE-STITCH (Correctly handling Supabase binary format)
+                const brainArray = new Uint8Array(data.brain.data || data.brain); 
+                const finalVideo = new Uint8Array(brainArray.length + brickArray.length);
+                finalVideo.set(brainArray, 0);
+                finalVideo.set(brickArray, brainArray.length);
+
+                // 4. PLAY
+                const videoBlob = new Blob([finalVideo], { type: 'video/mp4' });
+                player.src = URL.createObjectURL(videoBlob);
+                
+                status.style.display = 'none';
+                player.style.display = 'block';
+                player.play();
+
+            } catch (e) {
+                console.error("Evzones Protocol Error:", e);
+                status.innerHTML = "<h2>🛡️ PROTOCOL ERROR</h2><p>System handshake failed.</p>";
+            }
         }
         unlock();
     <\/script>
