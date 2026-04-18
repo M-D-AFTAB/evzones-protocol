@@ -52,22 +52,16 @@ export const processEvzonesVideo = async (file) => {
     };
 };
 
-// utils/evzonesEngine.js
 
-// ... (keep your processEvzonesVideo function as is)
-
-export const generateSmartAsset = async (asset) => {
-    // Check if assetID exists to prevent the ReferenceError
-    if (!asset.assetID) {
-        throw new Error("AssetID is missing. Cannot generate Smart Asset.");
-    }
+export const generateSmartAsset = async (asset, receivedId) => {
+    if (!receivedId) throw new Error("Missing ID for Smart Asset");
 
     const blob = new Blob([asset.brick], { type: 'application/octet-stream' });
 
     return new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = (e) => {
-            const base64Brick = e.target.result.split(',')[1]; // Get just the data part
+            const base64Brick = e.target.result.split(',')[1]; // Ensure we only get the raw Base64 data
 
             const htmlTemplate = `
 <!DOCTYPE html>
@@ -75,25 +69,26 @@ export const generateSmartAsset = async (asset) => {
 <head>
     <title>EVZONES PROTECTED: ${asset.fileName}</title>
     <style>
-        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
-        .lock-screen { text-align: center; border: 1px solid #00ff00; padding: 2rem; background: #0a0a0a; }
+        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; text-align: center; }
+        .lock-screen { border: 1px solid #00ff00; padding: 2rem; background: #0a0a0a; border-radius: 8px; }
         video { width: 100%; max-height: 100vh; display: none; }
     </style>
 </head>
 <body>
     <div id="status" class="lock-screen">
         <h2 style="color:#00ff00">🛡️ EVZONES PROTOCOL ACTIVE</h2>
-        <p>Verifying Domain Authority for ID: ${asset.assetID}</p>
+        <p>Verifying Authority for ID: ${receivedId}</p>
     </div>
     <video id="player" controls></video>
 
     <script>
-        const ASSET_ID = "${asset.assetID}"; // Passed from your Vercel Vault
+        // These constants are injected during the 'Stitching' process
+        const ASSET_ID = "${receivedId}"; 
         const BRICK_B64 = "${base64Brick}";
 
         async function unlock() {
-            // Your unlock logic (fetch from Vercel) will go here
-            console.log("Attempting to unlock Asset:", ASSET_ID);
+            console.log("Sentinel Initializing for:", ASSET_ID);
+            // Future: Fetch brain from /api/unlock?assetID=ASSET_ID
         }
         unlock();
     <\/script>
@@ -104,4 +99,3 @@ export const generateSmartAsset = async (asset) => {
         reader.readAsDataURL(blob);
     });
 };
-

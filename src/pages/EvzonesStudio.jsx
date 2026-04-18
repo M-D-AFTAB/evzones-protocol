@@ -21,14 +21,13 @@ export default function EvzonesStudio() {
 
     // Inside EvzonesStudio.jsx -> handleShieldAsset function
 
+    // Inside EvzonesStudio.jsx -> handleShieldAsset
+
     const handleShieldAsset = async () => {
         try {
             setStatus('PROCESSING');
-
-            // 1. Local Processing
             const data = await processEvzonesVideo(file);
 
-            // 2. Save to Vercel Vault
             const res = await fetch('/api/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -44,24 +43,21 @@ export default function EvzonesStudio() {
 
             const responseData = await res.json();
 
-            // CRITICAL: Extract the ID correctly
-            const receivedAssetID = responseData.assetID;
+            // Use a new variable name to avoid any shadow naming conflicts
+            const finalVaultID = responseData.assetID;
 
-            // 3. Generate HTML - Passing the ID into the object
-            const smartHtml = await generateSmartAsset({
-                ...data,
-                assetID: receivedAssetID
-            });
+            // UPDATED CALL: Passing data and finalVaultID separately
+            const smartHtml = await generateSmartAsset(data, finalVaultID);
 
             setResult({ smartHtml });
             setStatus('SUCCESS');
-
-            // ... rest of your history logic
+            // ... history logic ...
         } catch (err) {
-            console.error(err);
+            console.error("Evzones Error:", err);
             setStatus('FAILURE');
         }
     };
+
 
 
     return (
