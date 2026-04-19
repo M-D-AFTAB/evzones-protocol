@@ -10,7 +10,7 @@ const IcGlobe = () => <span>🌐</span>;
 
 export default function EvzonesStudio() {
     const [file, setFile] = useState(null);
-    const [whitelist, setWhitelist] = useState('localhost,127.0.0.1'); // Default for development
+    const [whitelist, setWhitelist] = useState('');
     const [email, setEmail] = useState('');
     const [trackingActive, setTrackingActive] = useState(true);
     const [status, setStatus] = useState('Standby');
@@ -144,9 +144,6 @@ export default function EvzonesStudio() {
                             value={whitelist}
                             onChange={(e) => setWhitelist(e.target.value)}
                         />
-                        <small style={{ color: '#8ca0b3', fontSize: '0.75rem' }}>
-                            Use "localhost" for local testing
-                        </small>
                     </div>
 
                     <div className="input-block">
