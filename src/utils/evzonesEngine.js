@@ -330,14 +330,25 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
         function appendBuffer(sb, chunk) {
             return new Promise(function(resolve, reject) {
-                function onDone() { sb.removeEventListener('error', onErr); resolve(); }
-                function onErr()  {
+                function onDone() {
+                    sb.removeEventListener('error', onErr);
+                    resolve();
+                }
+                function onErr(e) {
                     sb.removeEventListener('updateend', onDone);
-                    reject(new Error('SourceBuffer error, code: ' + (sb.error ? sb.error.code : 'null — likely codec rejected by browser. Codec: ' + MIME_TYPE)));
+                    var code = sb.error ? sb.error.code : 'null';
+                    var msg  = sb.error ? sb.error.message : 'no message';
+                    reject(new Error('SourceBuffer error code=' + code + ' msg=' + msg));
                 }
                 sb.addEventListener('updateend', onDone, { once: true });
                 sb.addEventListener('error',     onErr,  { once: true });
-                sb.appendBuffer(chunk);
+                try {
+                    sb.appendBuffer(chunk);
+                } catch(syncErr) {
+                    sb.removeEventListener('updateend', onDone);
+                    sb.removeEventListener('error', onErr);
+                    reject(new Error('appendBuffer threw synchronously: ' + syncErr.name + ': ' + syncErr.message));
+                }
             });
         }
 
