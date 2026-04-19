@@ -21,10 +21,11 @@ export const processEvzonesVideo = async (file) => {
     const key = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     const kid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     
+    // EME explicitly requires Fragmented MP4s. We force fragments with empty_moov.
     await ffmpeg.exec([
         '-i', 'input.mp4', 
         '-c', 'copy', 
-        '-movflags', 'faststart', 
+        '-movflags', 'frag_keyframe+empty_moov', 
         '-encryption_scheme', 'cenc-aes-ctr',
         '-encryption_key', key, 
         '-encryption_kid', kid, 
@@ -34,30 +35,30 @@ export const processEvzonesVideo = async (file) => {
     const data = await ffmpeg.readFile('protected.mp4');
     const uint8 = new Uint8Array(data.buffer);
     
-    let mdatIndex = -1;
+    // Strict MP4 Box Walker: Slicing at the first 'moof' box
+    // The Brain gets the ftyp & moov (DRM initialization and track maps).
+    // The Brick gets the moof & mdat chunks (The encrypted media).
+    let splitIndex = -1;
     let offset = 0;
     
     while (offset < uint8.length) {
         const size = (uint8[offset] * 16777216) + (uint8[offset+1] * 65536) + (uint8[offset+2] * 256) + uint8[offset+3];
         const type = String.fromCharCode(uint8[offset+4], uint8[offset+5], uint8[offset+6], uint8[offset+7]);
         
-        if (type === 'mdat') {
-            mdatIndex = offset;
+        if (type === 'moof' || type === 'mdat') {
+            splitIndex = offset;
             break;
         }
-        
         if (size === 0 || size < 8) break; 
         offset += size;
     }
 
-    if (mdatIndex === -1) {
-        throw new Error("Critical Error: Failed to locate mdat box cleanly.");
-    }
+    if (splitIndex === -1) throw new Error("Critical Error: Failed to locate fragmentation boundary.");
 
-    const brainBytes = uint8.slice(0, mdatIndex);
+    const brainBytes = uint8.slice(0, splitIndex);
     const brainBase64 = uint8ToBase64(brainBytes);
 
-    return { brain: brainBase64, brick: uint8.slice(mdatIndex), key, kid, fileName: file.name };
+    return { brain: brainBase64, brick: uint8.slice(splitIndex), key, kid, fileName: file.name };
 };
 
 export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
@@ -93,13 +94,21 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
     </div>
     <video id="player" controls controlsList="nodownload" muted playsinline preload="auto"></video>
     <script>
+        // EME JWK Key Formatter
         function hexToBase64Url(hex) {
             const bytes = new Uint8Array(hex.length / 2);
-            for (let i = 0; i < hex.length; i += 2) {
-                bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
-            }
-            const base64 = btoa(String.fromCharCode.apply(null, bytes));
-            return base64.replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+            for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+            return btoa(String.fromCharCode.apply(null, bytes)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+        }
+
+        // Bulletproof Base64 Decoder: Bypasses data URI limits and avoids InvalidCharacter errors
+        function decodeB64(b64) {
+            let clean = b64.replace(/-/g, '+').replace(/_/g, '/').replace(/[\\r\\n\\s]+/g, '');
+            while (clean.length % 4) clean += '='; // Guarantee perfect padding
+            const bin = window.atob(clean);
+            const buf = new Uint8Array(bin.length);
+            for(let i=0; i<bin.length; i++) buf[i] = bin.charCodeAt(i);
+            return buf;
         }
 
         (async function unlock() {
@@ -123,6 +132,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 const data = await res.json();
                 
+                // ClearKey EME Listener
                 player.addEventListener('encrypted', async (event) => {
                     console.log('🔒 CENC Encryption detected. Initializing ClearKey...');
                     try {
@@ -136,9 +146,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                         const session = keys.createSession();
                         
                         session.addEventListener('message', async (e) => {
-                            const jwkSet = {
-                                keys: [{ kty: 'oct', kid: hexToBase64Url(data.kid), k: hexToBase64Url(data.key) }]
-                            };
+                            const jwkSet = { keys: [{ kty: 'oct', kid: hexToBase64Url(data.kid), k: hexToBase64Url(data.key) }] };
                             await session.update(new TextEncoder().encode(JSON.stringify(jwkSet)));
                             console.log('🔓 Keys injected. Decryption active.');
                         });
@@ -149,37 +157,25 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                     }
                 });
 
-                debugMsg.textContent = "Decoding Brick via Memory Stream...";
+                debugMsg.textContent = "Decoding Matrix...";
                 
-                // 1. Decode Brick using Fetch (bypasses atob strictness and memory limits)
-                const cleanBrickB64 = BRICK_B64.replace(/[^A-Za-z0-9+/=]/g, '');
-                const brickRes = await fetch("data:application/octet-stream;base64," + cleanBrickB64);
-                const brickBuffer = await brickRes.arrayBuffer();
-                const brickArray = new Uint8Array(brickBuffer);
+                // Decode cleanly using the custom robust function
+                const brickArray = decodeB64(BRICK_B64);
+                
+                let brainStr = typeof data.brain === 'string' ? data.brain : (data.brain.data || '');
+                if (!brainStr) throw new Error("Invalid brain format from vault");
+                const brainArray = decodeB64(brainStr);
 
-                debugMsg.textContent = "Fetching Brain...";
+                debugMsg.textContent = "Stitching Fragmented Stream...";
 
-                // 2. Decode Brain using Fetch
-                let brainArray;
-                if (typeof data.brain === 'string') {
-                    const cleanBrainB64 = data.brain.replace(/[^A-Za-z0-9+/=]/g, '');
-                    const brainRes = await fetch("data:application/octet-stream;base64," + cleanBrainB64);
-                    const brainBuffer = await brainRes.arrayBuffer();
-                    brainArray = new Uint8Array(brainBuffer);
-                } else {
-                    throw new Error("Invalid brain data format received from vault.");
-                }
-
-                debugMsg.textContent = "Stitching Video Matrix...";
-
-                // 3. Stitch perfectly
                 const finalVideo = new Uint8Array(brainArray.length + brickArray.length);
                 finalVideo.set(brainArray, 0);
                 finalVideo.set(brickArray, brainArray.length);
 
                 debugMsg.textContent = "Decrypting via ClearKey...";
 
-                const videoBlob = new Blob([finalVideo], { type: 'video/mp4; codecs="avc1.4d401f, mp4a.40.2"' });
+                // Feed the perfectly formed fMP4 to the browser
+                const videoBlob = new Blob([finalVideo], { type: 'video/mp4' });
                 player.src = URL.createObjectURL(videoBlob);
                 status.style.display = 'none';
                 player.style.display = 'block';
