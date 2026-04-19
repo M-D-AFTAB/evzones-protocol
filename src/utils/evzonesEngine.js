@@ -24,7 +24,7 @@ export const processEvzonesVideo = async (file) => {
     await ffmpeg.exec([
         '-i', 'input.mp4', 
         '-c', 'copy', 
-        '-movflags', 'frag_keyframe+empty_moov', 
+        '-movflags', 'faststart+frag_keyframe',
         '-encryption_scheme', 'cenc-aes-ctr',
         '-encryption_key', key, 
         '-encryption_kid', kid, 
