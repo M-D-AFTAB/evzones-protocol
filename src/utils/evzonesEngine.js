@@ -108,16 +108,23 @@ export const processEvzonesVideo = async (file) => {
     //   omit_tfhd_offset   — removes absolute offsets from tfhd, required for MSE streaming
     // We do NOT use faststart here — it conflicts with empty_moov for fragmented output.
     // Pass 1: defragment (strips existing fragmentation metadata)
+    // Pass 1: defragment + strip problem tracks/metadata
     await ffmpeg.exec([
         '-i', 'input.mp4',
+        '-map', '0:v:0',       // video track only
+        '-map', '0:a:0',       // audio track only  
         '-c', 'copy',
+        '-ignore_unknown',     // drop tmcd and other non-av tracks
         '-movflags', '+faststart',
+        '-fflags', '+genpts',
         'defrag.mp4'
     ]);
 
-    // Pass 2: re-fragment cleanly
+    // Pass 2: fragment cleanly — now only 2 tracks, 2 trex, no tmcd
     await ffmpeg.exec([
         '-i', 'defrag.mp4',
+        '-map', '0:v:0',
+        '-map', '0:a:0',
         '-c:v', 'copy',
         '-c:a', 'copy',
         '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
@@ -279,6 +286,8 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
             );
             return new TextDecoder().decode(plain);
         }
+
+        console.log('BRAIN_FULL_B64:', btoa(String.fromCharCode(...brainBytes)));
 
         function appendBuffer(sb, chunk) {
             return new Promise(function(resolve, reject) {
