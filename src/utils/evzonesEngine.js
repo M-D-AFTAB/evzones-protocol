@@ -6,9 +6,10 @@ const ffmpeg = new FFmpeg();
 
 const uint8ToBase64 = (uint8) => {
     let binary = '';
-    const len = uint8.byteLength;
-    for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(uint8[i]);
+    const chunkSize = 8192; // Process in chunks to prevent stack overflow
+    for (let i = 0; i < uint8.length; i += chunkSize) {
+        const chunk = uint8.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, chunk);
     }
     return btoa(binary);
 };
@@ -23,7 +24,7 @@ export const processEvzonesVideo = async (file) => {
     await ffmpeg.exec([
         '-i', 'input.mp4',
         '-c', 'copy',
-        // Optimization: empty_moov is critical for MSE streaming
+        // default_base_moof is critical for Firefox stability
         '-movflags', 'faststart+frag_keyframe+empty_moov+default_base_moof',
         '-encryption_scheme', 'cenc-aes-ctr',
         '-encryption_key', key,
@@ -81,10 +82,14 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 </head>
 <body>
     <div id="status" class="lock-screen">
-        <h2 style="color:#00ff00">🛡️ SENTINEL PROTOCOL</h2>
-        <p id="msg">Authorizing Stream...</p>
-        <div id="debug">Initializing Buffer...</div>
+    <h2>🛡️ EVZONES PROTOCOL ACTIVE</h2>
+    <p id="msg">Handshake Ready. Secure Connection Established.</p>
+    <button id="start-btn" style="background:#00ff00; color:#000; border:none; padding:15px 30px; border-radius:5px; font-weight:bold; cursor:pointer;">
+        INITIALIZE DECRYPTION
+    </button>
+    <p id="debug" class="error-details"></p>
     </div>
+
     <video id="player" controls controlsList="nodownload" playsinline></video>
 
     <script>
@@ -116,6 +121,10 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
             }
         }
 
+        document.getElementById('start-btn').addEventListener('click', async function() {
+        this.style.display = 'none'; // Hide button after click
+        document.getElementById('msg').textContent = "Verifying Domain Authority...";
+        
         async function initSentinel() {
             const player = document.getElementById('player');
             const debug = document.getElementById('debug');
@@ -125,11 +134,11 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 const res = await fetch(VAULT_URL + "/api/unlock?assetID=" + ASSET_ID, { method: 'POST' });
                 if (!res.ok) throw new Error("Vault Access Denied: " + res.status);
                 const authData = await res.json();
-
+                
                 // 2. Initialize MediaSource (The "Streaming" Engine)
                 const ms = new MediaSource();
                 player.src = URL.createObjectURL(ms);
-
+                
                 ms.addEventListener('sourceopen', async () => {
                     // Use the specific codec produced by your Ingestion Engine
                     const sb = ms.addSourceBuffer('video/mp4; codecs="avc1.4d401f"');
@@ -139,27 +148,27 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                         const access = await navigator.requestMediaKeySystemAccess('org.w3.clearkey', [{
                             initDataTypes: [event.initDataType],
                             videoCapabilities: [{ contentType: 'video/mp4' }]
-                        }]);
-                        const keys = await access.createMediaKeys();
-                        await player.setMediaKeys(keys);
-                        const session = keys.createSession();
-                        session.addEventListener('message', async (e) => {
-                            const jwk = { keys: [{ kty: 'oct', kid: hexToBase64Url(authData.kid), k: hexToBase64Url(authData.key) }] };
-                            await session.update(new TextEncoder().encode(JSON.stringify(jwk)));
-                        });
-                        await session.generateRequest(event.initDataType, event.initData);
-                    });
+                            }]);
+                            const keys = await access.createMediaKeys();
+                            await player.setMediaKeys(keys);
+                            const session = keys.createSession();
+                            session.addEventListener('message', async (e) => {
+                                const jwk = { keys: [{ kty: 'oct', kid: hexToBase64Url(authData.kid), k: hexToBase64Url(authData.key) }] };
+                                await session.update(new TextEncoder().encode(JSON.stringify(jwk)));
+                                });
+                                await session.generateRequest(event.initDataType, event.initData);
+                                });
 
                     // 4. Feed the Brain (The Header)
-                    // Ensure brain is a clean string regardless of server response format
-                    let brainRaw = typeof authData.brain === 'string' ? authData.brain : JSON.stringify(authData.brain);
-                    const brainClean = brainRaw.replace(/[^A-Za-z0-9+/=]/g, "");
-
-                    const brainBinary = atob(brainClean);
-                    const brainArray = new Uint8Array(brainBinary.length);
-                    for(let i=0; i<brainBinary.length; i++) brainArray[i] = brainBinary.charCodeAt(i);
-                    sb.appendBuffer(brainArray);
-
+                    try {
+                        const brainBinary = atob(authData.brain);
+                        const brainArray = new Uint8Array(brainBinary.length);
+                        for(let i=0; i<brainBinary.length; i++) brainArray[i] = brainBinary.charCodeAt(i);
+                        sb.appendBuffer(brainArray);
+                    } catch (e) {
+                        throw new Error("Failed to decode Brain: Check Vault Response Format.");
+                    }
+                    
                     // 5. Stream the Brick in Chunks
                     const stream = chunkDecoder(BRICK_B64);
                     const pushNext = () => {
@@ -168,26 +177,27 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                         if (done) {
                             if (!sb.updating) ms.endOfStream();
                             return;
-                        }
-                        sb.appendBuffer(value);
-                    };
-
-                    sb.addEventListener('updateend', pushNext);
-                    pushNext(); // Start streaming first 1MB
-
+                            }
+                            sb.appendBuffer(value);
+                            };
+                            
+                            sb.addEventListener('updateend', pushNext);
+                            pushNext(); // Start streaming first 1MB
+                            
                     debug.textContent = "Handshake Success. Playing...";
                     document.getElementById('status').style.display = 'none';
                     player.style.display = 'block';
                     player.play();
-                });
-
-            } catch (err) {
-                document.getElementById('msg').innerHTML = "<span style='color:red'>SECURITY BREACH / ACCESS DENIED</span>";
-                debug.textContent = err.message;
-            }
-        }
-
-        initSentinel();
+                    });
+                    
+                    } catch (err) {
+                        document.getElementById('msg').innerHTML = "<span style='color:red'>SECURITY BREACH / ACCESS DENIED</span>";
+                        debug.textContent = err.message;
+                        }
+                        }
+                        
+                        initSentinel();
+            });
     <\/script>
 </body>
 </html>`;

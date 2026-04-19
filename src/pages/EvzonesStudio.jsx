@@ -9,231 +9,231 @@ const IcBrick = () => <span style={{ fontSize: '2.5rem' }}>📦</span>;
 const IcGlobe = () => <span>🌐</span>;
 
 export default function EvzonesStudio() {
-    const [file, setFile] = useState(null);
-    const [whitelist, setWhitelist] = useState('');
-    const [email, setEmail] = useState('');
-    const [trackingActive, setTrackingActive] = useState(true);
-    const [status, setStatus] = useState('Standby');
-    const [result, setResult] = useState(null);
-    const [history, setHistory] = useState([]);
+  const [file, setFile] = useState(null);
+  const [whitelist, setWhitelist] = useState('');
+  const [email, setEmail] = useState('');
+  const [trackingActive, setTrackingActive] = useState(true);
+  const [status, setStatus] = useState('Standby');
+  const [result, setResult] = useState(null);
+  const [history, setHistory] = useState([]);
 
-    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-    const VAULT_URL = import.meta.env.VITE_VAULT_URL || (isLocal ? 'http://localhost:3001' : window.location.origin);
+  const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  const VAULT_URL = import.meta.env.VITE_VAULT_URL || (isLocal ? 'http://localhost:3001' : window.location.origin);
 
-    const handleShieldAsset = async () => {
-        if (!file) {
-            alert('Please select a video file first');
-            return;
-        }
+  const handleShieldAsset = async () => {
+    if (!file) {
+      alert('Please select a video file first');
+      return;
+    }
 
-        if (!email) {
-            alert('Please enter your email for security alerts');
-            return;
-        }
+    if (!email) {
+      alert('Please enter your email for security alerts');
+      return;
+    }
 
-        try {
-            setStatus('PROCESSING');
+    try {
+      setStatus('PROCESSING');
 
-            // Step 1: Process video with FFmpeg (client-side)
-            console.log('Processing video...');
-            const data = await processEvzonesVideo(file);
-            console.log('Video processed. Brain size:', data.brain.length, 'Brick size:', data.brick.length);
+      // Step 1: Process video with FFmpeg (client-side)
+      console.log('Processing video...');
+      const data = await processEvzonesVideo(file);
+      console.log('Video processed. Brain size:', data.brain.length, 'Brick size:', data.brick.length);
 
-            // Step 2: Save to vault (send brain to server)
-            console.log('Saving to vault...');
-            const res = await fetch(`${VAULT_URL}/api/save`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    brain: Array.from(data.brain),
-                    key: data.key,
-                    kid: data.kid,
-                    whitelist: whitelist.split(',').map(d => d.trim()).filter(d => d),
-                    email: email,
-                    fileName: file.name
-                })
-            });
+      // Step 2: Save to vault (send brain to server)
+      console.log('Saving to vault...');
+      const res = await fetch(`${VAULT_URL}/api/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brain: data.brain, 
+          key: data.key,
+          kid: data.kid,
+          whitelist: whitelist.split(',').map(d => d.trim()).filter(d => d),
+          email: email,
+          fileName: file.name
+        })
+      });
 
-            if (!res.ok) {
-                throw new Error(`Server error: ${res.status} ${res.statusText}`);
-            }
+      if (!res.ok) {
+        throw new Error(`Server error: ${res.status} ${res.statusText}`);
+      }
 
-            const responseData = await res.json();
-            console.log('Vault response:', responseData);
+      const responseData = await res.json();
+      console.log('Vault response:', responseData);
 
-            const assetID = responseData.assetID;
+      const assetID = responseData.assetID;
 
-            if (!assetID) {
-                throw new Error('Server did not return an asset ID');
-            }
+      if (!assetID) {
+        throw new Error('Server did not return an asset ID');
+      }
 
-            // Step 3: Generate Smart Asset HTML
-            console.log('Generating smart asset with ID:', assetID);
-            const smartHtml = await generateSmartAsset(data, assetID, VAULT_URL);
+      // Step 3: Generate Smart Asset HTML
+      console.log('Generating smart asset with ID:', assetID);
+      const smartHtml = await generateSmartAsset(data, assetID, VAULT_URL);
 
-            setResult({ smartHtml, assetID });
-            setStatus('SUCCESS');
+      setResult({ smartHtml, assetID });
+      setStatus('SUCCESS');
 
-            // Add to history
-            setHistory([...history, {
-                name: file.name,
-                size: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
-                time: new Date().toLocaleTimeString(),
-                assetID
-            }]);
+      // Add to history
+      setHistory([...history, {
+        name: file.name,
+        size: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+        time: new Date().toLocaleTimeString(),
+        assetID
+      }]);
 
-        } catch (err) {
-            console.error("Evzones Error:", err);
-            setStatus('FAILURE');
-            alert(`Error: ${err.message}`);
-        }
-    };
+    } catch (err) {
+      console.error("Evzones Error:", err);
+      setStatus('FAILURE');
+      alert(`Error: ${err.message}`);
+    }
+  };
 
-    return (
-        <div className="sentinel-wrapper">
-            {/* 1. Header & Navigation */}
-            <header className="sentinel-header">
-                <div className="logo-group">
-                    <IcShield />
-                    <div className="logo-text">
-                        <span>EVZONES PROTOCOL</span>
-                        <span className="logo-status">ACTIVE DEFENSE</span>
-                    </div>
-                </div>
-                <nav className="nav-links">
-                    {['HOME', 'PROTECT ASSET', 'DASHBOARD', 'DOCUMENTATION', 'ABOUT'].map(link => (
-                        <a key={link} href="#" className={link === 'PROTECT ASSET' ? 'active' : ''}>{link}</a>
-                    ))}
-                </nav>
-            </header>
+  return (
+    <div className="sentinel-wrapper">
+      {/* 1. Header & Navigation */}
+      <header className="sentinel-header">
+        <div className="logo-group">
+          <IcShield />
+          <div className="logo-text">
+            <span>EVZONES PROTOCOL</span>
+            <span className="logo-status">ACTIVE DEFENSE</span>
+          </div>
+        </div>
+        <nav className="nav-links">
+          {['HOME', 'PROTECT ASSET', 'DASHBOARD', 'DOCUMENTATION', 'ABOUT'].map(link => (
+            <a key={link} href="#" className={link === 'PROTECT ASSET' ? 'active' : ''}>{link}</a>
+          ))}
+        </nav>
+      </header>
 
-            {/* 2. Main workflow title */}
-            <h1 className="main-workflow-title">PROTECT YOUR MEDIA</h1>
+      {/* 2. Main workflow title */}
+      <h1 className="main-workflow-title">PROTECT YOUR MEDIA</h1>
 
-            {/* 3. The 3-Column Workflow Panel */}
-            <main className="evzones-core-workflow">
-                {/* Step 1: Upload */}
-                <section className="workflow-card upload-zone">
-                    <h3>1. UPLOAD YOUR MEDIA</h3>
-                    <div className="drop-zone">
-                        <IcUpload />
-                        <p>drag-and-drop video file<br />or</p>
-                        <input
-                            type="file"
-                            accept="video/mp4, video/x-m4v, video/*"
-                            style={{ display: 'none' }}
-                            id="fileInput"
-                            onChange={(e) => setFile(e.target.files[0])}
-                        />
-                        <label htmlFor="fileInput" className="choose-file-btn">
-                            {file ? file.name : 'CHOOSE FILE'}
-                        </label>
-                        <p className="formats-hint">SELECT FILE (MP4, MOV...)</p>
-                    </div>
-                </section>
+      {/* 3. The 3-Column Workflow Panel */}
+      <main className="evzones-core-workflow">
+        {/* Step 1: Upload */}
+        <section className="workflow-card upload-zone">
+          <h3>1. UPLOAD YOUR MEDIA</h3>
+          <div className="drop-zone">
+            <IcUpload />
+            <p>drag-and-drop video file<br />or</p>
+            <input
+              type="file"
+              accept="video/mp4, video/x-m4v, video/*"
+              style={{ display: 'none' }}
+              id="fileInput"
+              onChange={(e) => setFile(e.target.files[0])}
+            />
+            <label htmlFor="fileInput" className="choose-file-btn">
+              {file ? file.name : 'CHOOSE FILE'}
+            </label>
+            <p className="formats-hint">SELECT FILE (MP4, MOV...)</p>
+          </div>
+        </section>
 
-                {/* Step 2: Configure */}
-                <section className="workflow-card configure-section">
-                    <h3>2. CONFIGURE PROTECTION</h3>
+        {/* Step 2: Configure */}
+        <section className="workflow-card configure-section">
+          <h3>2. CONFIGURE PROTECTION</h3>
 
-                    <div className="input-block">
-                        <label><IcGlobe /> ALLOWED DOMAINS (comma separated):</label>
-                        <input
-                            type="text"
-                            placeholder="example.com, sports-news.co"
-                            value={whitelist}
-                            onChange={(e) => setWhitelist(e.target.value)}
-                        />
-                    </div>
+          <div className="input-block">
+            <label><IcGlobe /> ALLOWED DOMAINS (comma separated):</label>
+            <input
+              type="text"
+              placeholder="example.com, sports-news.co"
+              value={whitelist}
+              onChange={(e) => setWhitelist(e.target.value)}
+            />
+          </div>
 
-                    <div className="input-block">
-                        <label>ALERT EMAIL:</label>
-                        <input
-                            type="email"
-                            placeholder="security@protocol.io"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                        />
-                    </div>
+          <div className="input-block">
+            <label>ALERT EMAIL:</label>
+            <input
+              type="email"
+              placeholder="security@protocol.io"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
 
-                    <div className="toggle-block">
-                        <div className="toggle-switch">
-                            <input type="checkbox" checked={trackingActive} onChange={() => setTrackingActive(!trackingActive)} id="tracking" />
-                            <label htmlFor="tracking"></label>
-                        </div>
-                        <span>ACTIVATE REAL-TIME TRACKING</span>
-                    </div>
-                </section>
-
-                {/* Status Feed */}
-                <aside className="workflow-card live-status-card">
-                    <h3><span className="live-dot"></span>Live Protection Status</h3>
-                    <div className="status-feed">
-                        {history.length > 0 ? history.map((entry, i) => (
-                            <div key={i} className="feed-entry">
-                                Protected Asset "{entry.name}" ({entry.size}) secured at {entry.time}.<br />
-                                Asset ID: <code>{entry.assetID}</code><br />
-                                Key stored in Sentinel Vault.
-                            </div>
-                        )) : <p className="feed-empty">Standby. No assets processed in this session.</p>}
-                    </div>
-                </aside>
-            </main>
-
-            {/* 4. Binary Split Visualization & Execution */}
-            <div className="split-execution-area">
-                <div className="split-visuals">
-                    <div className="split-asset brain-icon">
-                        <IcBrain />
-                        <div className="split-label">Key/Moov ID ("Brain")</div>
-                    </div>
-                    <div className="split-flow-arrow">---&gt;</div>
-                    <div className="split-asset brick-icon">
-                        <IcBrick />
-                        <div className="split-label">Protected.mp4 "Brick"</div>
-                    </div>
-                </div>
-
-                {/* Step 3: Execute */}
-                <section className="execute-section">
-                    <h3>3. SECURE & LOBOTOMIZE</h3>
-                    <button
-                        className={`generate-btn ${status === 'PROCESSING' ? 'loading' : ''}`}
-                        onClick={handleShieldAsset}
-                        disabled={status === 'PROCESSING' || !file}
-                    >
-                        {status === 'PROCESSING' ? 'PROCESSING IN BROWSER...' : 'GENERATE PROTECTED ASSET'}
-                        <span className="spinner"></span>
-                    </button>
-                    <p className="browser-processing-hint">
-                        Video is processed entirely in your browser using FFmpeg.wasm. No data is sent to our server until you save.
-                    </p>
-                    {status === 'FAILURE' && (
-                        <p style={{ color: '#e74c3c', marginTop: '10px' }}>
-                            ❌ Processing failed. Check console for details.
-                        </p>
-                    )}
-                </section>
+          <div className="toggle-block">
+            <div className="toggle-switch">
+              <input type="checkbox" checked={trackingActive} onChange={() => setTrackingActive(!trackingActive)} id="tracking" />
+              <label htmlFor="tracking"></label>
             </div>
+            <span>ACTIVATE REAL-TIME TRACKING</span>
+          </div>
+        </section>
 
-            {/* 5. Result Download */}
-            {result && (
-                <div className="result-download-panel">
-                    <div>
-                        ✅ Asset Secured! Your <strong>Self-Protecting Video</strong> is ready.<br />
-                        <small>Asset ID: {result.assetID}</small>
-                    </div>
-                    <button onClick={() => {
-                        const a = document.createElement('a');
-                        a.href = URL.createObjectURL(result.smartHtml);
-                        a.download = `EVZONES_${file.name.replace('.mp4', '')}.html`;
-                        a.click();
-                    }}>DOWNLOAD SMART ASSET (.HTML)</button>
-                </div>
-            )}
+        {/* Status Feed */}
+        <aside className="workflow-card live-status-card">
+          <h3><span className="live-dot"></span>Live Protection Status</h3>
+          <div className="status-feed">
+            {history.length > 0 ? history.map((entry, i) => (
+              <div key={i} className="feed-entry">
+                Protected Asset "{entry.name}" ({entry.size}) secured at {entry.time}.<br />
+                Asset ID: <code>{entry.assetID}</code><br />
+                Key stored in Sentinel Vault.
+              </div>
+            )) : <p className="feed-empty">Standby. No assets processed in this session.</p>}
+          </div>
+        </aside>
+      </main>
 
-            {/* Internal CSS for scoped styling */}
-            <style>{`
+      {/* 4. Binary Split Visualization & Execution */}
+      <div className="split-execution-area">
+        <div className="split-visuals">
+          <div className="split-asset brain-icon">
+            <IcBrain />
+            <div className="split-label">Key/Moov ID ("Brain")</div>
+          </div>
+          <div className="split-flow-arrow">---&gt;</div>
+          <div className="split-asset brick-icon">
+            <IcBrick />
+            <div className="split-label">Protected.mp4 "Brick"</div>
+          </div>
+        </div>
+
+        {/* Step 3: Execute */}
+        <section className="execute-section">
+          <h3>3. SECURE & LOBOTOMIZE</h3>
+          <button
+            className={`generate-btn ${status === 'PROCESSING' ? 'loading' : ''}`}
+            onClick={handleShieldAsset}
+            disabled={status === 'PROCESSING' || !file}
+          >
+            {status === 'PROCESSING' ? 'PROCESSING IN BROWSER...' : 'GENERATE PROTECTED ASSET'}
+            <span className="spinner"></span>
+          </button>
+          <p className="browser-processing-hint">
+            Video is processed entirely in your browser using FFmpeg.wasm. No data is sent to our server until you save.
+          </p>
+          {status === 'FAILURE' && (
+            <p style={{ color: '#e74c3c', marginTop: '10px' }}>
+              ❌ Processing failed. Check console for details.
+            </p>
+          )}
+        </section>
+      </div>
+
+      {/* 5. Result Download */}
+      {result && (
+        <div className="result-download-panel">
+          <div>
+            ✅ Asset Secured! Your <strong>Self-Protecting Video</strong> is ready.<br />
+            <small>Asset ID: {result.assetID}</small>
+          </div>
+          <button onClick={() => {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(result.smartHtml);
+            a.download = `EVZONES_${file.name.replace('.mp4', '')}.html`;
+            a.click();
+          }}>DOWNLOAD SMART ASSET (.HTML)</button>
+        </div>
+      )}
+
+      {/* Internal CSS for scoped styling */}
+      <style>{`
         .sentinel-wrapper {
           max-width: 1400px;
           margin: 0 auto;
@@ -503,6 +503,6 @@ export default function EvzonesStudio() {
 
         @keyframes spin { to { transform: rotate(360deg); } }
       `}</style>
-        </div>
-    );
+    </div>
+  );
 }

@@ -7,7 +7,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 export default async function handler(req, res) {
   const origin = req.headers.origin || req.headers.referer || "";
 
-  res.setHeader('Access-Control-Allow-Origin', '*'); 
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
@@ -42,9 +42,9 @@ export default async function handler(req, res) {
   if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
     isWhitelisted = true;
   } else if (asset.whitelist) {
-    const whitelistArray = Array.isArray(asset.whitelist) 
-        ? asset.whitelist 
-        : asset.whitelist.split(',');
+    const whitelistArray = Array.isArray(asset.whitelist)
+      ? asset.whitelist
+      : asset.whitelist.split(',');
 
     let hostname = '';
     try {
@@ -96,10 +96,14 @@ export default async function handler(req, res) {
   // 6. Success → send data
   console.log('✅ Authorized access granted');
 
+  // Convert BYTEA Buffer to Base64 string
+  const brainBase64 = Buffer.from(asset.brain).toString('base64');
+
   return res.status(200).json({
-    brain: asset.brain,
+    brain: brainBase64, // Now it's a clean string
     key: asset.key,
     kid: asset.kid,
     success: true
   });
+
 }
