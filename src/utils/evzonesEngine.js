@@ -111,10 +111,11 @@ export const processEvzonesVideo = async (file) => {
     // Pass 1: defragment + strip problem tracks/metadata
     await ffmpeg.exec([
         '-i', 'input.mp4',
-        '-map', '0:v:0',       // video track only
-        '-map', '0:a:0',       // audio track only  
+        '-map', '0:v:0',
+        '-map', '0:a:0',
         '-c', 'copy',
-        '-ignore_unknown',     // drop tmcd and other non-av tracks
+        '-map_metadata', '-1',      // ← add this
+        '-ignore_unknown',
         '-movflags', '+faststart',
         '-fflags', '+genpts',
         'defrag.mp4'
@@ -127,6 +128,7 @@ export const processEvzonesVideo = async (file) => {
         '-map', '0:a:0',
         '-c:v', 'copy',
         '-c:a', 'copy',
+        '-map_metadata', '-1',      // ← strip ALL metadata/udta boxes
         '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
         '-frag_duration', '2000000',
         '-brand', 'isom',
