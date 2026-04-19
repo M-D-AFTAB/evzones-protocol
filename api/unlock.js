@@ -18,6 +18,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
+  
   const { assetID } = req.query;
 
   if (!assetID) {
@@ -37,6 +38,7 @@ export default async function handler(req, res) {
     console.error('Database error:', error);
     return res.status(404).json({ error: 'Asset not found' });
   }
+  
   let isWhitelisted = false;
 
   if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
@@ -59,7 +61,7 @@ export default async function handler(req, res) {
     });
   }
 
-  // 5. If NOT authorized → block + alert
+  // If NOT authorized → block + alert
   if (!isWhitelisted) {
     console.log('🚨 Unauthorized access attempt from:', origin);
 
@@ -93,17 +95,48 @@ export default async function handler(req, res) {
     });
   }
 
-
+  // Success → send data
   console.log('✅ Authorized access granted');
 
-  const brainBuffer = Buffer.from(asset.brain);
-  const brainBase64 = brainBuffer.toString('base64');
+  // CRITICAL FIX: Properly handle brain data from Supabase
+  let cleanBrain = asset.brain;
+
+  // Case 1: If Supabase returns a Buffer (BYTEA type)
+  if (Buffer.isBuffer(asset.brain)) {
+    console.log('Converting Buffer to Base64');
+    cleanBrain = asset.brain.toString('base64');
+  } 
+  // Case 2: If it's already a string but might have JSON array format from old bug
+  else if (typeof asset.brain === 'string') {
+    // Remove any whitespace that might have been added
+    cleanBrain = asset.brain.trim();
+    
+    // If it looks like a JSON array string, try to parse and concatenate
+    if (cleanBrain.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(cleanBrain);
+        if (Array.isArray(parsed)) {
+          cleanBrain = parsed.join('');
+        }
+      } catch (e) {
+        console.log('Brain is not JSON array, using as-is');
+      }
+    }
+  }
+
+  // Final validation: ensure it's valid Base64
+  const base64Pattern = /^[A-Za-z0-9+/]+=*$/;
+  if (!base64Pattern.test(cleanBrain)) {
+    console.error('Invalid Base64 format detected');
+    return res.status(500).json({ error: 'Corrupted brain data' });
+  }
+
+  console.log('Brain data length:', cleanBrain.length);
 
   return res.status(200).json({
-    brain: brainBase64, 
+    brain: cleanBrain,
     key: asset.key,
     kid: asset.kid,
     success: true
   });
-
 }

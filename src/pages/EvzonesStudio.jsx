@@ -44,14 +44,15 @@ export default function EvzonesStudio() {
       const res = await fetch(`${VAULT_URL}/api/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          brain: data.brain, 
+        
+      body: JSON.stringify({
+          brain: data.brain, // data.brain is already a Base64 string from evzonesEngine.js
           key: data.key,
           kid: data.kid,
           whitelist: whitelist.split(',').map(d => d.trim()).filter(d => d),
           email: email,
           fileName: file.name
-        })
+      })
       });
 
       if (!res.ok) {
