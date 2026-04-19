@@ -17,8 +17,8 @@ export default function EvzonesStudio() {
     const [result, setResult] = useState(null);
     const [history, setHistory] = useState([]);
 
-    // Get vault URL from environment or use default
-    const VAULT_URL = import.meta.env.VITE_VAULT_URL || 'http://localhost:3001';
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const VAULT_URL = import.meta.env.VITE_VAULT_URL || (isLocal ? 'http://localhost:3001' : window.location.origin);
 
     const handleShieldAsset = async () => {
         if (!file) {
@@ -33,7 +33,7 @@ export default function EvzonesStudio() {
 
         try {
             setStatus('PROCESSING');
-            
+
             // Step 1: Process video with FFmpeg (client-side)
             console.log('Processing video...');
             const data = await processEvzonesVideo(file);
@@ -73,7 +73,7 @@ export default function EvzonesStudio() {
 
             setResult({ smartHtml, assetID });
             setStatus('SUCCESS');
-            
+
             // Add to history
             setHistory([...history, {
                 name: file.name,
