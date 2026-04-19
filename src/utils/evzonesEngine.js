@@ -4,6 +4,16 @@ import { fetchFile } from '@ffmpeg/util';
 
 const ffmpeg = new FFmpeg();
 
+const uint8ToBase64 = (uint8) => {
+    let binary = '';
+    const chunkSize = 8192; 
+    for (let i = 0; i < uint8.length; i += chunkSize) {
+        const chunk = uint8.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+};
+
 export const processEvzonesVideo = async (file) => {
     if (!ffmpeg.loaded) await ffmpeg.load();
     await ffmpeg.writeFile('input.mp4', await fetchFile(file));
@@ -11,28 +21,54 @@ export const processEvzonesVideo = async (file) => {
     const key = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     const kid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     
-    // We keep the encryption flags here for true CENC DRM
-    await ffmpeg.exec(['-i', 'input.mp4', '-c', 'copy', '-movflags', 'faststart+frag_keyframe+empty_moov', '-encryption_key', key, '-encryption_kid', kid, 'protected.mp4']);
+    // We MUST use faststart to keep the moov (Brain) whole and at the front.
+    // We also explicitly declare the encryption scheme for the browser's EME.
+    await ffmpeg.exec([
+        '-i', 'input.mp4', 
+        '-c', 'copy', 
+        '-movflags', 'faststart', 
+        '-encryption_scheme', 'cenc-aes-ctr',
+        '-encryption_key', key, 
+        '-encryption_kid', kid, 
+        'protected.mp4'
+    ]);
     
     const data = await ffmpeg.readFile('protected.mp4');
     const uint8 = new Uint8Array(data.buffer);
     
-    let mdatIndex = 0;
-    for (let i = 0; i < uint8.length - 4; i++) {
-        if (uint8[i] === 109 && uint8[i + 1] === 100 && uint8[i + 2] === 97 && uint8[i + 3] === 116) {
-            mdatIndex = i - 4; 
+    // THE FIX: Strict MP4 Box Walker
+    // This accurately reads the 4-byte size of each box and jumps over it,
+    // completely avoiding accidental string collisions in the encrypted video data.
+    let mdatIndex = -1;
+    let offset = 0;
+    
+    while (offset < uint8.length) {
+        const size = (uint8[offset] * 16777216) + (uint8[offset+1] * 65536) + (uint8[offset+2] * 256) + uint8[offset+3];
+        const type = String.fromCharCode(uint8[offset+4], uint8[offset+5], uint8[offset+6], uint8[offset+7]);
+        
+        if (type === 'mdat') {
+            mdatIndex = offset;
             break;
         }
+        
+        if (size === 0 || size < 8) break; // Prevents infinite loop on malformed files
+        offset += size;
     }
-    return { brain: uint8.slice(0, mdatIndex), brick: uint8.slice(mdatIndex), key, kid, fileName: file.name };
+
+    if (mdatIndex === -1) {
+        throw new Error("Critical Error: Failed to locate mdat box cleanly.");
+    }
+
+    const brainBytes = uint8.slice(0, mdatIndex);
+    const brainBase64 = uint8ToBase64(brainBytes);
+
+    return { brain: brainBase64, brick: uint8.slice(mdatIndex), key, kid, fileName: file.name };
 };
 
 export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
     if (!receivedId) throw new Error("Missing ID for Smart Asset");
     
-    // Use environment variable or fallback to production URL
     const VAULT_URL = vaultBaseUrl || import.meta.env.VITE_VAULT_URL || 'https://evzones-protocol.vercel.app';
-    
     const brickBlob = new Blob([asset.brick], { type: 'application/octet-stream' });
 
     return new Promise((resolve) => {
@@ -40,7 +76,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         reader.onload = (e) => {
             const base64Brick = e.target.result.split(',')[1];
             
-            // Note: Carefully escaped string below to avoid VS Code syntax errors
             const htmlTemplate = `
 <!DOCTYPE html>
 <html lang="en">
@@ -61,9 +96,10 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         <p id="msg">Verifying Domain Authority...</p>
         <p id="debug" class="error-details"></p>
     </div>
-    <video id="player" controls controlsList="nodownload"></video>
+    
+    <video id="player" controls controlsList="nodownload" muted playsinline preload="auto"></video>
+    
     <script>
-        // Helper: ClearKey DRM requires keys in Base64URL format
         function hexToBase64Url(hex) {
             const bytes = new Uint8Array(hex.length / 2);
             for (let i = 0; i < hex.length; i += 2) {
@@ -82,30 +118,21 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
             try {
                 const FETCH_URL = "${VAULT_URL}/api/unlock?assetID=" + ASSET_ID;
-                
                 debugMsg.textContent = "Connecting to Vault...";
                 
-                const res = await fetch(FETCH_URL, { 
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
+                const res = await fetch(FETCH_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }});
 
                 if (res.status === 403) {
-                    status.innerHTML = "<h2 style='color:#ff4444'>❌ UNAUTHORIZED DOMAIN</h2><p>Access Denied. This asset can only be viewed on authorized domains.</p>";
+                    status.innerHTML = "<h2 style='color:#ff4444'>❌ UNAUTHORIZED DOMAIN</h2><p>Access Denied.</p>";
                     return;
                 }
-
-                if (!res.ok) {
-                    throw new Error("Server returned " + res.status + " " + res.statusText);
-                }
+                if (!res.ok) throw new Error("Server returned " + res.status);
 
                 const data = await res.json();
                 
-                // --- THE CLEARKEY EME INTEGRATION ---
+                // ClearKey EME Integration
                 player.addEventListener('encrypted', async (event) => {
-                    console.log('🔒 CENC Encryption detected. Initializing ClearKey DRM...');
+                    console.log('🔒 CENC Encryption detected. Initializing ClearKey...');
                     try {
                         const access = await navigator.requestMediaKeySystemAccess('org.w3.clearkey', [{
                             initDataTypes: [event.initDataType],
@@ -118,14 +145,9 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                         
                         session.addEventListener('message', async (e) => {
                             const jwkSet = {
-                                keys: [{
-                                    kty: 'oct',
-                                    kid: hexToBase64Url(data.kid),
-                                    k: hexToBase64Url(data.key)
-                                }]
+                                keys: [{ kty: 'oct', kid: hexToBase64Url(data.kid), k: hexToBase64Url(data.key) }]
                             };
-                            const jwkBytes = new TextEncoder().encode(JSON.stringify(jwkSet));
-                            await session.update(jwkBytes);
+                            await session.update(new TextEncoder().encode(JSON.stringify(jwkSet)));
                             console.log('🔓 Keys injected. Decryption active.');
                         });
                         
@@ -134,49 +156,41 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                         console.error('EME Decryption Failed:', err);
                     }
                 });
-                // --- END EME INTEGRATION ---
 
-                // Handle different brain data formats securely
-                let brainArray;
-                if (data.brain) {
-                    if (Array.isArray(data.brain)) {
-                        brainArray = new Uint8Array(data.brain);
-                    } else if (data.brain.data) {
-                        brainArray = new Uint8Array(data.brain.data);
-                    } else if (data.brain.type === 'Buffer') {
-                        brainArray = new Uint8Array(data.brain.data);
-                    } else {
-                        brainArray = new Uint8Array(Object.values(data.brain));
-                    }
-                } else {
-                    throw new Error("No brain data received from server");
-                }
-                
                 debugMsg.textContent = "Processing encrypted chunks...";
                 
-                // Convert base64 brick to binary
+                // 1. Decode Brick securely
                 const binaryString = atob(BRICK_B64);
                 const brickArray = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) { 
-                    brickArray[i] = binaryString.charCodeAt(i); 
+                for (let i = 0; i < binaryString.length; i++) brickArray[i] = binaryString.charCodeAt(i); 
+
+                // 2. Decode Brain safely from Vault Base64 string
+                let brainArray;
+                if (typeof data.brain === 'string') {
+                    const brainBinary = atob(data.brain);
+                    brainArray = new Uint8Array(brainBinary.length);
+                    for (let i = 0; i < brainBinary.length; i++) {
+                        brainArray[i] = brainBinary.charCodeAt(i);
+                    }
+                } else {
+                    throw new Error("Invalid brain data format received from vault.");
                 }
 
-                // Stitch brain + brick together
+                // 3. Stitch perfectly
                 const finalVideo = new Uint8Array(brainArray.length + brickArray.length);
                 finalVideo.set(brainArray, 0);
                 finalVideo.set(brickArray, brainArray.length);
 
                 debugMsg.textContent = "Decrypting via ClearKey...";
 
-                // Play video
-                const videoBlob = new Blob([finalVideo], { type: 'video/mp4' });
+                // Feeding exact codec hints to satisfy strict Firefox requirements
+                const videoBlob = new Blob([finalVideo], { type: 'video/mp4; codecs="avc1.4d401f, mp4a.40.2"' });
                 player.src = URL.createObjectURL(videoBlob);
                 status.style.display = 'none';
                 player.style.display = 'block';
                 
-                // Auto-play with error handling
                 player.play().catch(err => {
-                    console.log("Autoplay blocked, user must click play:", err);
+                    console.log("Autoplay blocked, user must click play manually");
                 });
 
             } catch (e) {
