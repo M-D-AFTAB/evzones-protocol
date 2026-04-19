@@ -21,15 +21,16 @@ export const processEvzonesVideo = async (file) => {
     const key = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     const kid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     
-    await ffmpeg.exec([
-        '-i', 'input.mp4', 
-        '-c', 'copy', 
-        '-movflags', 'faststart+frag_keyframe',
-        '-encryption_scheme', 'cenc-aes-ctr',
-        '-encryption_key', key, 
-        '-encryption_kid', kid, 
-        'protected.mp4'
-    ]);
+   await ffmpeg.exec([
+    '-i', 'input.mp4', 
+    '-c', 'copy', 
+    // Optimization: empty_moov is critical for MSE streaming
+    '-movflags', 'faststart+frag_keyframe+empty_moov+default_base_moof',
+    '-encryption_scheme', 'cenc-aes-ctr',
+    '-encryption_key', key, 
+    '-encryption_kid', kid, 
+    'protected.mp4'
+]);
     
     const data = await ffmpeg.readFile('protected.mp4');
     const uint8 = new Uint8Array(data.buffer);
@@ -58,9 +59,7 @@ export const processEvzonesVideo = async (file) => {
 };
 
 export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
-    if (!receivedId) throw new Error("Missing ID for Smart Asset");
-    
-    const VAULT_URL = vaultBaseUrl || import.meta.env.VITE_VAULT_URL || 'https://evzones-protocol.vercel.app';
+    const VAULT_URL = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
     const brickBlob = new Blob([asset.brick], { type: 'application/octet-stream' });
 
     return new Promise((resolve) => {
@@ -73,131 +72,113 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>EVZONES PROTECTED: ${asset.fileName}</title>
+    <title>EVZONES SENTINEL: ${asset.fileName}</title>
     <style>
-        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; text-align: center; }
-        .lock-screen { border: 1px solid #00ff00; padding: 2.5rem; background: #0a0a0a; border-radius: 12px; box-shadow: 0 0 20px rgba(0,255,0,0.2); }
-        h2 { color: #00ff00; margin-top: 0; }
+        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
         #player { width: 100%; max-height: 100vh; display: none; }
-        .error-details { font-size: 0.8rem; color: #ff6b6b; margin-top: 10px; font-family: monospace; }
+        .lock-screen { border: 1px solid #00ff00; padding: 2rem; background: #0a0a0a; border-radius: 12px; text-align: center; }
+        #debug { font-family: monospace; font-size: 0.8rem; color: #00ff00; margin-top: 10px; opacity: 0.7; }
     </style>
 </head>
 <body>
     <div id="status" class="lock-screen">
-        <h2>🛡️ EVZONES PROTOCOL ACTIVE</h2>
-        <p id="msg">Verifying Domain Authority...</p>
-        <p id="debug" class="error-details"></p>
+        <h2 style="color:#00ff00">🛡️ SENTINEL PROTOCOL</h2>
+        <p id="msg">Authorizing Stream...</p>
+        <div id="debug">Initializing Buffer...</div>
     </div>
-    <video id="player" controls controlsList="nodownload" muted playsinline preload="auto"></video>
+    <video id="player" controls controlsList="nodownload" playsinline></video>
+
     <script>
+        const BRICK_B64 = "${base64Brick}";
+        const ASSET_ID = "${receivedId}";
+        const VAULT_URL = "${VAULT_URL}";
+
+        // Helper: Convert Hex to Base64Url for ClearKey
         function hexToBase64Url(hex) {
             const bytes = new Uint8Array(hex.length / 2);
             for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
             return btoa(String.fromCharCode.apply(null, bytes)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
         }
 
-        // Pure Math Decoder: Completely bypasses atob() crashes and fetch() data limits
-        function decodeB64(b64) {
-            const str = b64.replace(/[^A-Za-z0-9+/=]/g, "");
-            const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            const lookup = new Uint8Array(256);
-            for (let i = 0; i < chars.length; i++) lookup[chars.charCodeAt(i)] = i;
-
-            let len = str.length;
-            if (str[len - 1] === "=") len--;
-            if (str[len - 1] === "=") len--;
-
-            const buffer = new Uint8Array(Math.floor((len * 3) / 4));
-            let p = 0;
-            for (let i = 0; i < len; i += 4) {
-                let e1 = lookup[str.charCodeAt(i)];
-                let e2 = lookup[str.charCodeAt(i + 1)];
-                let e3 = lookup[str.charCodeAt(i + 2) || 0];
-                let e4 = lookup[str.charCodeAt(i + 3) || 0];
-
-                buffer[p++] = (e1 << 2) | (e2 >> 4);
-                if (p < buffer.length) buffer[p++] = ((e2 & 15) << 4) | (e3 >> 2);
-                if (p < buffer.length) buffer[p++] = ((e3 & 3) << 6) | (e4 & 63);
+        // Optimized Generator: Decodes B64 in small chunks to save RAM
+        function* chunkDecoder(b64, chunkSize = 1024 * 1024) {
+            const binary = atob(b64);
+            for (let i = 0; i < binary.length; i += chunkSize) {
+                const chunk = binary.slice(i, i + chunkSize);
+                const bytes = new Uint8Array(chunk.length);
+                for (let j = 0; j < chunk.length; j++) bytes[j] = chunk.charCodeAt(j);
+                yield bytes;
             }
-            return buffer;
         }
 
-        (async function unlock() {
-            const ASSET_ID = "${receivedId}"; 
-            const BRICK_B64 = "${base64Brick}";
+        async function initSentinel() {
             const player = document.getElementById('player');
-            const status = document.getElementById('status');
-            const debugMsg = document.getElementById('debug');
+            const debug = document.getElementById('debug');
 
             try {
-                const FETCH_URL = "${VAULT_URL}/api/unlock?assetID=" + ASSET_ID;
-                debugMsg.textContent = "Connecting to Vault...";
-                
-                const res = await fetch(FETCH_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }});
+                // 1. Handshake with Vault
+                const res = await fetch(VAULT_URL + "/api/unlock?assetID=" + ASSET_ID, { method: 'POST' });
+                if (!res.ok) throw new Error("Vault Access Denied: " + res.status);
+                const authData = await res.json();
 
-                if (res.status === 403) {
-                    status.innerHTML = "<h2 style='color:#ff4444'>❌ UNAUTHORIZED DOMAIN</h2><p>Access Denied.</p>";
-                    return;
-                }
-                if (!res.ok) throw new Error("Server returned " + res.status);
+                // 2. Initialize MediaSource (The "Streaming" Engine)
+                const ms = new MediaSource();
+                player.src = URL.createObjectURL(ms);
 
-                const data = await res.json();
-                
-                player.addEventListener('encrypted', async (event) => {
-                    console.log('🔒 CENC Encryption detected. Initializing ClearKey...');
-                    try {
+                ms.addEventListener('sourceopen', async () => {
+                    // Use the specific codec produced by your Ingestion Engine
+                    const sb = ms.addSourceBuffer('video/mp4; codecs="avc1.4d401f"');
+                    
+                    // 3. EME ClearKey Security (Retained from your original logic)
+                    player.addEventListener('encrypted', async (event) => {
                         const access = await navigator.requestMediaKeySystemAccess('org.w3.clearkey', [{
                             initDataTypes: [event.initDataType],
                             videoCapabilities: [{ contentType: 'video/mp4' }]
                         }]);
-                        
                         const keys = await access.createMediaKeys();
                         await player.setMediaKeys(keys);
                         const session = keys.createSession();
-                        
                         session.addEventListener('message', async (e) => {
-                            const jwkSet = { keys: [{ kty: 'oct', kid: hexToBase64Url(data.kid), k: hexToBase64Url(data.key) }] };
-                            await session.update(new TextEncoder().encode(JSON.stringify(jwkSet)));
-                            console.log('🔓 Keys injected. Decryption active.');
+                            const jwk = { keys: [{ kty: 'oct', kid: hexToBase64Url(authData.kid), k: hexToBase64Url(authData.key) }] };
+                            await session.update(new TextEncoder().encode(JSON.stringify(jwk)));
                         });
-                        
                         await session.generateRequest(event.initDataType, event.initData);
-                    } catch (err) {
-                        console.error('EME Decryption Failed:', err);
-                    }
+                    });
+
+                    // 4. Feed the Brain (The Header)
+                    const brainBinary = atob(authData.brain);
+                    const brainArray = new Uint8Array(brainBinary.length);
+                    for(let i=0; i<brainBinary.length; i++) brainArray[i] = brainBinary.charCodeAt(i);
+                    sb.appendBuffer(brainArray);
+
+                    // 5. Stream the Brick in Chunks
+                    const stream = chunkDecoder(BRICK_B64);
+                    const pushNext = () => {
+                        if (sb.updating || ms.readyState !== 'open') return;
+                        const { value, done } = stream.next();
+                        if (done) {
+                            if (!sb.updating) ms.endOfStream();
+                            return;
+                        }
+                        sb.appendBuffer(value);
+                    };
+
+                    sb.addEventListener('updateend', pushNext);
+                    pushNext(); // Start streaming first 1MB
+
+                    debug.textContent = "Handshake Success. Playing...";
+                    document.getElementById('status').style.display = 'none';
+                    player.style.display = 'block';
+                    player.play();
                 });
 
-                debugMsg.textContent = "Decoding Matrix...";
-                
-                const brickArray = decodeB64(BRICK_B64);
-                
-                let brainStr = typeof data.brain === 'string' ? data.brain : (data.brain.data || '');
-                if (!brainStr) throw new Error("Invalid brain format from vault");
-                const brainArray = decodeB64(brainStr);
-
-                debugMsg.textContent = "Stitching Fragmented Stream...";
-
-                const finalVideo = new Uint8Array(brainArray.length + brickArray.length);
-                finalVideo.set(brainArray, 0);
-                finalVideo.set(brickArray, brainArray.length);
-
-                debugMsg.textContent = "Decrypting via ClearKey...";
-
-                const videoBlob = new Blob([finalVideo], { type: 'video/mp4' });
-                player.src = URL.createObjectURL(videoBlob);
-                status.style.display = 'none';
-                player.style.display = 'block';
-                
-                player.play().catch(err => {
-                    console.log("Autoplay blocked, user must click play manually");
-                });
-
-            } catch (e) {
-                console.error("Evzones Error:", e);
-                status.innerHTML = "<h2 style='color:#ff4444'>Handshake Failed</h2>";
-                debugMsg.textContent = "Error: " + e.message;
+            } catch (err) {
+                document.getElementById('msg').innerHTML = "<span style='color:red'>SECURITY BREACH / ACCESS DENIED</span>";
+                debug.textContent = err.message;
             }
-        })();
+        }
+
+        initSentinel();
     <\/script>
 </body>
 </html>`;
