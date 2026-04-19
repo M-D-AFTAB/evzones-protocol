@@ -287,8 +287,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
             return new TextDecoder().decode(plain);
         }
 
-        console.log('BRAIN_FULL_B64:', btoa(String.fromCharCode(...brainBytes)));
-
         function appendBuffer(sb, chunk) {
             return new Promise(function(resolve, reject) {
                 function onDone() { sb.removeEventListener('error', onErr); resolve(); }
