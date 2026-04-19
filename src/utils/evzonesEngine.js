@@ -20,6 +20,23 @@ const readUint32 = (u8, o) =>
 const readBoxType = (u8, o) =>
     String.fromCharCode(u8[o + 4], u8[o + 5], u8[o + 6], u8[o + 7]);
 
+// Patch ftyp major brand to 'isom' — Chrome MSE rejects 'iso5' init segments
+// in empty_moov fragmented files due to strict mvex/trex validation.
+const patchFtypBrand = (uint8) => {
+    // ftyp box is always first: [size 4B][type "ftyp" 4B][major_brand 4B]...
+    if (uint8[4]===0x66 && uint8[5]===0x74 && uint8[6]===0x79 && uint8[7]===0x70) {
+        const patched = new Uint8Array(uint8);
+        // Write 'isom' (69 73 6f 6d) at offset 8
+        patched[8]  = 0x69; // i
+        patched[9]  = 0x73; // s
+        patched[10] = 0x6f; // o
+        patched[11] = 0x6d; // m
+        console.log('[Engine] ftyp brand patched: iso5 → isom');
+        return patched;
+    }
+    return uint8;
+};
+
 // Detect codec from avcC box. Returns plain string like: avc1.4D401E
 const detectCodec = (uint8) => {
     for (let i = 0; i < uint8.length - 10; i++) {
@@ -91,19 +108,23 @@ export const processEvzonesVideo = async (file) => {
     //   omit_tfhd_offset   — removes absolute offsets from tfhd, required for MSE streaming
     // We do NOT use faststart here — it conflicts with empty_moov for fragmented output.
     await ffmpeg.exec([
-        '-i', 'input.mp4',
-        '-c:v', 'copy',
-        '-c:a', 'copy',
-        '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
-        '-frag_duration', '2000000',
-        'fragmented.mp4'
-    ]);
+    '-i', 'input.mp4',
+    '-c:v', 'copy',
+    '-c:a', 'copy',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
+    '-frag_duration', '2000000',
+    // ✅ Force isom brand — Chrome MSE accepts this; iso5 causes strict mvex validation
+    '-brand', 'isom',
+    '-use_editlist', '0',
+    'fragmented.mp4'
+]);
 
     const data = await ffmpeg.readFile('fragmented.mp4');
     const uint8 = new Uint8Array(data.buffer);
     console.log('[Engine] FFmpeg output:', uint8.length, 'bytes');
 
-    const { brainBytes, brickBytes } = splitFragmentedMp4(uint8);
+    const { brainBytes: rawBrain, brickBytes } = splitFragmentedMp4(uint8);
+    const brainBytes = patchFtypBrand(rawBrain);  // ✅ fix Chrome ftyp rejection
     const codec = detectCodec(brainBytes);
 
     const keyBytes = crypto.getRandomValues(new Uint8Array(16));
