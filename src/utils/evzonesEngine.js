@@ -163,6 +163,10 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
     const brickBase64 = uint8ToBase64(asset.brick);
 
+    // Escape inner double-quotes so the MIME string is safe inside a JS "..." literal
+    // e.g. video/mp4; codecs="avc1.4d401e"  →  video/mp4; codecs=\"avc1.4d401e\"
+    const safeMime = mimeType.replace(/"/g, '\\"');
+
     console.log('[Engine] Generating Smart Asset:', receivedId);
     console.log('[Engine] MIME:', mimeType, '| Brick B64:', brickBase64.length);
 
@@ -224,7 +228,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         const BRICK_B64 = "${brickBase64}";
         const ASSET_ID  = "${receivedId}";
         const VAULT_URL = "${VAULT_URL}";
-        const MIME_TYPE = "${mimeType}";
+        const MIME_TYPE = "${safeMime}";
 
         function hexToBytes(hex) {
             const b = new Uint8Array(hex.length / 2);
