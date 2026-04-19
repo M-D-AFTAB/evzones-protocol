@@ -24,11 +24,11 @@ const readBoxType = (u8, o) =>
 // in empty_moov fragmented files due to strict mvex/trex validation.
 const patchFtypBrand = (uint8) => {
     // ftyp box is always first: [size 4B][type "ftyp" 4B][major_brand 4B]...
-    if (uint8[4]===0x66 && uint8[5]===0x74 && uint8[6]===0x79 && uint8[7]===0x70) {
+    if (uint8[4] === 0x66 && uint8[5] === 0x74 && uint8[6] === 0x79 && uint8[7] === 0x70) {
         const patched = new Uint8Array(uint8);
         // Write 'isom' (69 73 6f 6d) at offset 8
-        patched[8]  = 0x69; // i
-        patched[9]  = 0x73; // s
+        patched[8] = 0x69; // i
+        patched[9] = 0x73; // s
         patched[10] = 0x6f; // o
         patched[11] = 0x6d; // m
         console.log('[Engine] ftyp brand patched: iso5 → isom');
@@ -107,17 +107,25 @@ export const processEvzonesVideo = async (file) => {
     //   default_base_moof  — Chrome requires this for correct tfdt/moof base offsets
     //   omit_tfhd_offset   — removes absolute offsets from tfhd, required for MSE streaming
     // We do NOT use faststart here — it conflicts with empty_moov for fragmented output.
+    // Pass 1: defragment (strips existing fragmentation metadata)
     await ffmpeg.exec([
-    '-i', 'input.mp4',
-    '-c:v', 'copy',
-    '-c:a', 'copy',
-    '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
-    '-frag_duration', '2000000',
-    // ✅ Force isom brand — Chrome MSE accepts this; iso5 causes strict mvex validation
-    '-brand', 'isom',
-    '-use_editlist', '0',
-    'fragmented.mp4'
-]);
+        '-i', 'input.mp4',
+        '-c', 'copy',
+        '-movflags', '+faststart',
+        'defrag.mp4'
+    ]);
+
+    // Pass 2: re-fragment cleanly
+    await ffmpeg.exec([
+        '-i', 'defrag.mp4',
+        '-c:v', 'copy',
+        '-c:a', 'copy',
+        '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
+        '-frag_duration', '2000000',
+        '-brand', 'isom',
+        '-use_editlist', '0',
+        'fragmented.mp4'
+    ]);
 
     const data = await ffmpeg.readFile('fragmented.mp4');
     const uint8 = new Uint8Array(data.buffer);
