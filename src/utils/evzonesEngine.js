@@ -83,9 +83,18 @@ export const processEvzonesVideo = async (file) => {
     await ffmpeg.writeFile('input.mp4', await fetchFile(file));
 
     console.log('[Engine] Fragmenting...');
+    // Flags explained:
+    //   frag_keyframe      — start a new fragment at every keyframe
+    //   empty_moov         — write moov with mvex box but no sample data (required for MSE)
+    //   default_base_moof  — Chrome requires this for correct tfdt/moof base offsets
+    //   omit_tfhd_offset   — removes absolute offsets from tfhd, required for MSE streaming
+    // We do NOT use faststart here — it conflicts with empty_moov for fragmented output.
     await ffmpeg.exec([
-        '-i', 'input.mp4', '-c', 'copy',
-        '-movflags', 'faststart+frag_keyframe+empty_moov+default_base_moof',
+        '-i', 'input.mp4',
+        '-c:v', 'copy',
+        '-c:a', 'copy',
+        '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
+        '-frag_duration', '2000000',
         'fragmented.mp4'
     ]);
 
@@ -337,14 +346,24 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 });
 
                 var sb = ms.addSourceBuffer(MIME_TYPE);
-                console.log('SourceBuffer created with:', MIME_TYPE);
+                // Chrome MSE requires 'segments' mode for fragmented MP4 (ftyp+moov / moof+mdat).
+                // Firefox defaults to 'segments' automatically; Chrome does not.
+                sb.mode = 'segments';
+                console.log('SourceBuffer created, mode:', sb.mode);
 
-                // Step 7: Append brain (init segment)
+                // Diagnostic: log first 16 bytes of brain to confirm ftyp header
+                var brainHex = Array.from(brainBytes.slice(0, 16))
+                    .map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' ');
+                console.log('Brain header (hex):', brainHex);
+                // Valid ftyp starts with: ?? ?? ?? ?? 66 74 79 70  (size + "ftyp")
+                // Valid moov starts with: ?? ?? ?? ?? 6d 6f 6f 76  (size + "moov")
+
+                // Step 7: Append brain (init segment = ftyp + moov)
                 step(7, 'Appending init segment...');
                 await appendBuffer(sb, brainBytes);
                 console.log('Brain appended OK');
 
-                // Step 8: Stream brick in 512 KB chunks
+                // Step 8: Stream brick in 512 KB chunks (moof + mdat pairs)
                 step(8, 'Streaming media...');
                 var CHUNK = 512 * 1024;
                 for (var i = 0; i < brickBytes.length; i += CHUNK) {
