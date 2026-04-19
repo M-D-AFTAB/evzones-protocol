@@ -37,6 +37,45 @@ const patchFtypBrand = (uint8) => {
     return uint8;
 };
 
+// Surgically remove udta box from moov — Chrome aborts on malformed meta inside udta
+const removeUdtaFromBrain = (uint8) => {
+    // Find moov box
+    let offset = 0;
+    while (offset < uint8.length - 8) {
+        const size = readUint32(uint8, offset);
+        const type = readBoxType(uint8, offset);
+        if (type === 'moov') {
+            // Walk inside moov to find udta
+            let inner = offset + 8;
+            while (inner < offset + size - 8) {
+                const iSize = readUint32(uint8, inner);
+                const iType = readBoxType(uint8, inner);
+                if (iType === 'udta') {
+                    // Build new buffer without the udta box
+                    const newTotal = uint8.length - iSize;
+                    const out = new Uint8Array(newTotal);
+                    out.set(uint8.slice(0, inner), 0);
+                    out.set(uint8.slice(inner + iSize), inner);
+                    // Fix moov box size (4 bytes at moov start)
+                    const newMoovSize = size - iSize;
+                    out[offset]   = (newMoovSize >>> 24) & 0xff;
+                    out[offset+1] = (newMoovSize >>> 16) & 0xff;
+                    out[offset+2] = (newMoovSize >>> 8)  & 0xff;
+                    out[offset+3] =  newMoovSize         & 0xff;
+                    console.log('[Engine] udta removed from brain (' + iSize + ' bytes stripped)');
+                    return out;
+                }
+                if (iSize < 8) break;
+                inner += iSize;
+            }
+            break;
+        }
+        if (size < 8) break;
+        offset += size;
+    }
+    return uint8;
+};
+
 // Detect codec from avcC box. Returns plain string like: avc1.4D401E
 const detectCodec = (uint8) => {
     for (let i = 0; i < uint8.length - 10; i++) {
@@ -141,7 +180,7 @@ export const processEvzonesVideo = async (file) => {
     console.log('[Engine] FFmpeg output:', uint8.length, 'bytes');
 
     const { brainBytes: rawBrain, brickBytes } = splitFragmentedMp4(uint8);
-    const brainBytes = patchFtypBrand(rawBrain);  // ✅ fix Chrome ftyp rejection
+    const brainBytes = removeUdtaFromBrain(patchFtypBrand(rawBrain)); // ← add removeUdta
     const codec = detectCodec(brainBytes);
 
     const keyBytes = crypto.getRandomValues(new Uint8Array(16));
