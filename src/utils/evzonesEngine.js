@@ -104,20 +104,32 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
             return btoa(String.fromCharCode.apply(null, bytes)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
         }
 
-       // This version strips whitespace and potential data-uri prefixes automatically
+            // Replace the chunkDecoder in your template with this:
         function* chunkDecoder(b64, chunkSize = 1024 * 1024) {
-            // 1. Clean the string (Remove prefixes and whitespace)
-            const cleanB64 = b64.includes(',') ? b64.split(',')[1] : b64.replace(/\s/g, '');
+            // 1. Strip everything before the first comma (Data-URI prefix)
+            let cleanB64 = b64.includes(',') ? b64.split(',')[1] : b64;
             
-            // 2. Decode the whole string safely
-            const binary = atob(cleanB64); 
-            
-            // 3. Yield slices to the MediaSource buffer
-            for (let i = 0; i < binary.length; i += chunkSize) {
-                const chunk = binary.slice(i, i + chunkSize);
-                const bytes = new Uint8Array(chunk.length);
-                for (let j = 0; j < chunk.length; j++) bytes[j] = chunk.charCodeAt(j);
-                yield bytes;
+            // 2. Remove ANY whitespace, newlines, or carriage returns
+            cleanB64 = cleanB64.replace(/\s/g, '');
+
+            // 3. Ensure the string length is a multiple of 4 (Base64 requirement)
+            while (cleanB64.length % 4 !== 0) {
+                cleanB64 += '=';
+            }
+
+            try {
+                const binary = atob(cleanB64);
+                for (let i = 0; i < binary.length; i += chunkSize) {
+                    const chunk = binary.slice(i, i + chunkSize);
+                    const bytes = new Uint8Array(chunk.length);
+                    for (let j = 0; j < chunk.length; j++) {
+                        bytes[j] = chunk.charCodeAt(j);
+                    }
+                    yield bytes;
+                }
+            } catch (e) {
+                console.error("Base64 Decoding Failed:", e);
+                throw new Error("The 'Brick' data is corrupted or incorrectly encoded.");
             }
         }
 
@@ -161,12 +173,26 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                     // 4. Feed the Brain (The Header)
                     try {
-                        const brainBinary = atob(authData.brain);
+                        // Ensure we handle potential stringified objects from Supabase
+                        let rawBrain = authData.brain;
+                        if (typeof rawBrain !== 'string') {
+                            rawBrain = rawBrain.data || JSON.stringify(rawBrain);
+                        }
+
+                        // Clean the brain string
+                        const cleanBrain = rawBrain.replace(/[^A-Za-z0-9+/=]/g, "");
+                        const brainBinary = atob(cleanBrain);
+                        
                         const brainArray = new Uint8Array(brainBinary.length);
-                        for(let i=0; i<brainBinary.length; i++) brainArray[i] = brainBinary.charCodeAt(i);
+                        for(let i = 0; i < brainBinary.length; i++) {
+                            brainArray[i] = brainBinary.charCodeAt(i);
+                        }
+
+                        console.log("Feeding Brain, size:", brainArray.byteLength);
                         sb.appendBuffer(brainArray);
                     } catch (e) {
-                        throw new Error("Failed to decode Brain: Check Vault Response Format.");
+                        console.error("Brain Error:", e);
+                        throw new Error("The 'Brain' (metadata) is invalid.");
                     }
                     
                     // 5. Stream the Brick in Chunks

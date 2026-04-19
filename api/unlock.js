@@ -93,17 +93,17 @@ export default async function handler(req, res) {
     });
   }
 
-  // 6. Success → send data
-  console.log('✅ Authorized access granted');
 
-  // Convert BYTEA Buffer to Base64 string
-  const brainBase64 = Buffer.from(asset.brain).toString('base64');
+console.log('✅ Authorized access granted');
 
-  return res.status(200).json({
-    brain: brainBase64, // Now it's a clean string
+// Convert the Supabase Buffer to a clean Base64 string
+const brainBase64 = Buffer.from(asset.brain).toString('base64');
+
+return res.status(200).json({
+    brain: brainBase64,
     key: asset.key,
     kid: asset.kid,
     success: true
-  });
+});
 
 }
