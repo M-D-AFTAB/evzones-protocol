@@ -1,9 +1,7 @@
 import React, { useState } from 'react';
-// Add generateSmartAsset to the curly braces
 import { processEvzonesVideo, generateSmartAsset } from '../utils/evzonesEngine';
 
-
-// Icons for UX (simulated for simplicity, use SVG/FontAwesome for production)
+// Icons for UX
 const IcUpload = () => <span style={{ fontSize: '3rem' }}>📄</span>;
 const IcShield = () => <span style={{ fontSize: '1rem' }}>🛡️</span>;
 const IcBrain = () => <span style={{ fontSize: '2.5rem' }}>🔑</span>;
@@ -12,58 +10,88 @@ const IcGlobe = () => <span>🌐</span>;
 
 export default function EvzonesStudio() {
     const [file, setFile] = useState(null);
-    const [whitelist, setWhitelist] = useState('');
+    const [whitelist, setWhitelist] = useState('localhost,127.0.0.1'); // Default for development
     const [email, setEmail] = useState('');
     const [trackingActive, setTrackingActive] = useState(true);
     const [status, setStatus] = useState('Standby');
     const [result, setResult] = useState(null);
     const [history, setHistory] = useState([]);
 
-    // Inside EvzonesStudio.jsx -> handleShieldAsset function
-
-    // Inside EvzonesStudio.jsx -> handleShieldAsset
+    // Get vault URL from environment or use default
+    const VAULT_URL = import.meta.env.VITE_VAULT_URL || 'http://localhost:3001';
 
     const handleShieldAsset = async () => {
+        if (!file) {
+            alert('Please select a video file first');
+            return;
+        }
+
+        if (!email) {
+            alert('Please enter your email for security alerts');
+            return;
+        }
+
         try {
             setStatus('PROCESSING');
+            
+            // Step 1: Process video with FFmpeg (client-side)
+            console.log('Processing video...');
             const data = await processEvzonesVideo(file);
+            console.log('Video processed. Brain size:', data.brain.length, 'Brick size:', data.brick.length);
 
-            const res = await fetch('/api/save', {
+            // Step 2: Save to vault (send brain to server)
+            console.log('Saving to vault...');
+            const res = await fetch(`${VAULT_URL}/api/save`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     brain: Array.from(data.brain),
                     key: data.key,
                     kid: data.kid,
-                    whitelist: whitelist.split(','),
+                    whitelist: whitelist.split(',').map(d => d.trim()).filter(d => d),
                     email: email,
                     fileName: file.name
                 })
             });
 
+            if (!res.ok) {
+                throw new Error(`Server error: ${res.status} ${res.statusText}`);
+            }
+
             const responseData = await res.json();
+            console.log('Vault response:', responseData);
 
-            // Use a new variable name to avoid any shadow naming conflicts
-            const finalVaultID = responseData.assetID;
+            const assetID = responseData.assetID;
 
-            // UPDATED CALL: Passing data and finalVaultID separately
-            const smartHtml = await generateSmartAsset(data, finalVaultID);
+            if (!assetID) {
+                throw new Error('Server did not return an asset ID');
+            }
 
-            setResult({ smartHtml });
+            // Step 3: Generate Smart Asset HTML
+            console.log('Generating smart asset with ID:', assetID);
+            const smartHtml = await generateSmartAsset(data, assetID, VAULT_URL);
+
+            setResult({ smartHtml, assetID });
             setStatus('SUCCESS');
-            // ... history logic ...
+            
+            // Add to history
+            setHistory([...history, {
+                name: file.name,
+                size: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+                time: new Date().toLocaleTimeString(),
+                assetID
+            }]);
+
         } catch (err) {
             console.error("Evzones Error:", err);
             setStatus('FAILURE');
+            alert(`Error: ${err.message}`);
         }
     };
 
-
-
     return (
         <div className="sentinel-wrapper">
-
-            {/* 1. Header & Navigation (Matches top-bar) */}
+            {/* 1. Header & Navigation */}
             <header className="sentinel-header">
                 <div className="logo-group">
                     <IcShield />
@@ -79,13 +107,12 @@ export default function EvzonesStudio() {
                 </nav>
             </header>
 
-            {/* 2. Main workflow title (Matches center-align) */}
+            {/* 2. Main workflow title */}
             <h1 className="main-workflow-title">PROTECT YOUR MEDIA</h1>
 
-            {/* 3. The 3-Column Workflow Panel (Matches main card structure) */}
+            {/* 3. The 3-Column Workflow Panel */}
             <main className="evzones-core-workflow">
-
-                {/* Step 1: Upload (Matches drag-drop zone) */}
+                {/* Step 1: Upload */}
                 <section className="workflow-card upload-zone">
                     <h3>1. UPLOAD YOUR MEDIA</h3>
                     <div className="drop-zone">
@@ -105,7 +132,7 @@ export default function EvzonesStudio() {
                     </div>
                 </section>
 
-                {/* Step 2: Configure (Matches right-side inputs) */}
+                {/* Step 2: Configure */}
                 <section className="workflow-card configure-section">
                     <h3>2. CONFIGURE PROTECTION</h3>
 
@@ -117,6 +144,9 @@ export default function EvzonesStudio() {
                             value={whitelist}
                             onChange={(e) => setWhitelist(e.target.value)}
                         />
+                        <small style={{ color: '#8ca0b3', fontSize: '0.75rem' }}>
+                            Use "localhost" for local testing
+                        </small>
                     </div>
 
                     <div className="input-block">
@@ -138,23 +168,23 @@ export default function EvzonesStudio() {
                     </div>
                 </section>
 
-                {/* Status Feed (Matches 'Live Protection Status' card) */}
+                {/* Status Feed */}
                 <aside className="workflow-card live-status-card">
                     <h3><span className="live-dot"></span>Live Protection Status</h3>
                     <div className="status-feed">
                         {history.length > 0 ? history.map((entry, i) => (
                             <div key={i} className="feed-entry">
                                 Protected Asset "{entry.name}" ({entry.size}) secured at {entry.time}.<br />
-                                Key stored in Sentinel Vault. <a href="#">Download Brick.</a>
+                                Asset ID: <code>{entry.assetID}</code><br />
+                                Key stored in Sentinel Vault.
                             </div>
                         )) : <p className="feed-empty">Standby. No assets processed in this session.</p>}
                     </div>
                 </aside>
             </main>
 
-            {/* 4. Binary Split Visualization & Execution (Matches center flow) */}
+            {/* 4. Binary Split Visualization & Execution */}
             <div className="split-execution-area">
-
                 <div className="split-visuals">
                     <div className="split-asset brain-icon">
                         <IcBrain />
@@ -163,17 +193,17 @@ export default function EvzonesStudio() {
                     <div className="split-flow-arrow">---&gt;</div>
                     <div className="split-asset brick-icon">
                         <IcBrick />
-                        <div className="split-label">Protected.mp4 "Brick" [&gt;100MB]</div>
+                        <div className="split-label">Protected.mp4 "Brick"</div>
                     </div>
                 </div>
 
-                {/* Step 3: Execute (Matches prominent generated asset button) */}
+                {/* Step 3: Execute */}
                 <section className="execute-section">
                     <h3>3. SECURE & LOBOTOMIZE</h3>
                     <button
                         className={`generate-btn ${status === 'PROCESSING' ? 'loading' : ''}`}
                         onClick={handleShieldAsset}
-                        disabled={status === 'PROCESSING'}
+                        disabled={status === 'PROCESSING' || !file}
                     >
                         {status === 'PROCESSING' ? 'PROCESSING IN BROWSER...' : 'GENERATE PROTECTED ASSET'}
                         <span className="spinner"></span>
@@ -181,60 +211,97 @@ export default function EvzonesStudio() {
                     <p className="browser-processing-hint">
                         Video is processed entirely in your browser using FFmpeg.wasm. No data is sent to our server until you save.
                     </p>
+                    {status === 'FAILURE' && (
+                        <p style={{ color: '#e74c3c', marginTop: '10px' }}>
+                            ❌ Processing failed. Check console for details.
+                        </p>
+                    )}
                 </section>
             </div>
 
-            {/* 5. Result Download (Visible only after successful processing) */}
+            {/* 5. Result Download */}
             {result && (
                 <div className="result-download-panel">
-                    Asset Secured! Your <strong>Self-Protecting Video</strong> is ready.
+                    <div>
+                        ✅ Asset Secured! Your <strong>Self-Protecting Video</strong> is ready.<br />
+                        <small>Asset ID: {result.assetID}</small>
+                    </div>
                     <button onClick={() => {
                         const a = document.createElement('a');
                         a.href = URL.createObjectURL(result.smartHtml);
-                        a.download = `EVZONES_${file.name}.html`;
+                        a.download = `EVZONES_${file.name.replace('.mp4', '')}.html`;
                         a.click();
                     }}>DOWNLOAD SMART ASSET (.HTML)</button>
                 </div>
             )}
 
-            {/* Internal CSS for scoped styling (no external files needed) */}
+            {/* Internal CSS for scoped styling */}
             <style>{`
         .sentinel-wrapper {
-          width: 100%;
-          max-width: 1200px;
-          display: flex;
-          flex-direction: column;
-          color: var(--text-main);
-          background-image: url("data:image/svg+xml,%3Csvg width='80' height='80' viewBox='0 0 80 80' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2312243d' fill-opacity='0.2'%3E%3Cpath d='M40 40c0-11.046-8.954-20-20-20S0 28.954 0 40s8.954 20 20 20 20-8.954 20-20zm40 0c0-11.046-8.954-20-20-20S40 28.954 40 40s8.954 20 20 20 20-8.954 20-20zM20 20C20 8.954 11.046 0 0 0s-20 8.954-20 20 8.954 20 20 20 20-8.954 20-20zm40 0c0-11.046-8.954-20-20-20S20 8.954 20 20s8.954 20 20 20 20-8.954 20-20z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
-          background-attachment: fixed;
-          background-position: center;
-          padding-bottom: 50px;
+          max-width: 1400px;
+          margin: 0 auto;
+          padding: 20px;
         }
 
-        /* 1. Header & Nav */
+        /* 1. Header/Navigation Bar (Matches the 'top-bar' style) */
         .sentinel-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 15px 0;
-          border-bottom: 1px solid rgba(255,255,255,0.05);
+          background-color: var(--panel-dark);
+          border-radius: 8px;
+          padding: 18px 25px;
+          margin-bottom: 30px;
+          border: 1px solid rgba(255,255,255,0.03);
         }
         .logo-group {
           display: flex;
           align-items: center;
           gap: 12px;
+        }
+        .logo-text {
+          display: flex;
+          flex-direction: column;
+          line-height: 1.3;
+        }
+        .logo-text span:first-child {
+          font-size: 1.1rem;
+          font-weight: 800;
+          letter-spacing: 0.5px;
+        }
+        .logo-status {
+          font-size: 0.65rem;
+          color: var(--evzones-green);
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        }
+        .nav-links {
+          display: flex;
+          gap: 30px;
+        }
+        .nav-links a {
+          color: var(--text-muted);
+          text-decoration: none;
+          font-size: 0.85rem;
+          font-weight: 600;
+          position: relative;
+          transition: 0.3s;
+        }
+        .nav-links a:hover, .nav-links a.active {
           color: var(--text-main);
         }
-        .logo-text { display: flex; flex-direction: column; font-weight: 700; }
-        .logo-status { font-size: 0.7rem; color: var(--evzones-blue); font-weight: 300; }
-        .nav-links { display: flex; gap: 30px; font-weight: 600; font-size: 0.9rem; }
-        .nav-links a { color: var(--text-muted); text-decoration: none; transition: 0.3s; }
-        .nav-links a:hover, .nav-links a.active { color: var(--text-main); }
+        .nav-links a.active::after {
+          content: '';
+          position: absolute;
+          bottom: -5px; left: 0; right: 0;
+          height: 2px;
+          background-color: var(--evzones-blue);
+        }
 
-        /* Titles */
         .main-workflow-title {
           text-align: center;
-          margin: 60px 0 40px;
+          color: var(--text-main);
+          margin-bottom: 30px;
           font-size: 2.2rem;
           font-weight: 800;
           letter-spacing: 1px;
@@ -340,8 +407,13 @@ export default function EvzonesStudio() {
         }
         .status-feed { font-size: 0.8rem; color: var(--text-muted); max-height: 250px; overflow-y: auto; }
         .feed-entry { margin-bottom: 15px; line-height: 1.6; }
-        .feed-entry a { color: var(--evzones-blue); text-decoration: none; }
-        .feed-entry a:hover { text-decoration: underline; }
+        .feed-entry code { 
+          background: rgba(0,255,0,0.1); 
+          padding: 2px 6px; 
+          border-radius: 3px; 
+          font-family: monospace;
+          font-size: 0.75rem;
+        }
 
         /* 3. Execution & Visualization Area */
         .split-execution-area {
@@ -394,7 +466,7 @@ export default function EvzonesStudio() {
           position: relative;
           transition: 0.3s;
         }
-        .generate-btn:hover { background-color: #0077d7; }
+        .generate-btn:hover:not(:disabled) { background-color: #0077d7; }
         .generate-btn:disabled { background-color: rgba(255,255,255,0.1); color: rgba(255,255,255,0.3); cursor: not-allowed; }
         .spinner {
           display: none;
@@ -409,12 +481,11 @@ export default function EvzonesStudio() {
         .browser-processing-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 10px; line-height: 1.6; }
 
         .result-download-panel {
-          grid-column: 1 / -1;
           margin-top: 30px;
           background-color: var(--evzones-green);
           color: #000;
-          padding: 15px;
-          border-radius: 4px;
+          padding: 20px;
+          border-radius: 8px;
           font-weight: 700;
           display: flex;
           justify-content: space-between;
@@ -424,10 +495,13 @@ export default function EvzonesStudio() {
           background-color: black;
           color: white;
           border: none;
-          padding: 10px 20px;
+          padding: 12px 24px;
           border-radius: 4px;
           font-weight: 600;
           cursor: pointer;
+        }
+        .result-download-panel button:hover {
+          background-color: #222;
         }
 
         @keyframes spin { to { transform: rotate(360deg); } }
