@@ -4,7 +4,7 @@ import { Resend } from 'resend';
 import crypto from 'crypto';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const resend   = new Resend(process.env.RESEND_API_KEY);
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 export default async function handler(req, res) {
     const origin = req.headers.origin || req.headers.referer || '';
@@ -14,7 +14,7 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') return res.status(204).end();
-    if (req.method !== 'POST')   return res.status(405).json({ error: 'Method Not Allowed' });
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
     const { assetID } = req.query;
 
@@ -73,8 +73,8 @@ export default async function handler(req, res) {
         if (process.env.RESEND_API_KEY && asset.owner_email) {
             try {
                 await resend.emails.send({
-                    from:    'Sentinel Alerts <onboarding@resend.dev>',
-                    to:      asset.owner_email,
+                    from: 'Sentinel Alerts <onboarding@resend.dev>',
+                    to: asset.owner_email,
                     subject: 'Security alert: Unauthorized access attempt',
                     html: `<h2>Security Alert</h2>
                            <p><strong>Source:</strong> ${origin}</p>
@@ -94,9 +94,11 @@ export default async function handler(req, res) {
     } else if (typeof brain === 'string') {
         brain = brain.trim();
         if (brain.startsWith('[')) {
-            try { const p = JSON.parse(brain); if (Array.isArray(p)) brain = p.join(''); } catch {}
+            try { const p = JSON.parse(brain); if (Array.isArray(p)) brain = p.join(''); } catch { }
         }
     }
+
+    brain = brain.replace(/\s/g, '');
 
     const b64Pattern = /^[A-Za-z0-9+/]+=*$/;
     if (!b64Pattern.test(brain)) {
@@ -123,18 +125,18 @@ export default async function handler(req, res) {
 
         // Generate one-time AES-256-GCM session key
         const sessionKey = crypto.randomBytes(32);
-        const iv         = crypto.randomBytes(12);
+        const iv = crypto.randomBytes(12);
 
         // Encrypt payload with AES-256-GCM
-        const plaintext  = JSON.stringify({ brain, key: asset.key, kid: asset.kid });
-        const cipher     = crypto.createCipheriv('aes-256-gcm', sessionKey, iv);
-        const encrypted  = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-        const authTag    = cipher.getAuthTag();
+        const plaintext = JSON.stringify({ brain, key: asset.key, kid: asset.kid });
+        const cipher = crypto.createCipheriv('aes-256-gcm', sessionKey, iv);
+        const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+        const authTag = cipher.getAuthTag();
 
         // Encrypt session key with client RSA public key
         const encryptedSessionKey = crypto.publicEncrypt(
             {
-                key:     crypto.createPublicKey({ key: clientPubKeyDer, format: 'der', type: 'spki' }),
+                key: crypto.createPublicKey({ key: clientPubKeyDer, format: 'der', type: 'spki' }),
                 padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
                 oaepHash: 'sha256'
             },
@@ -148,9 +150,9 @@ export default async function handler(req, res) {
             // RSA-encrypted AES session key
             wrappedKey: encryptedSessionKey.toString('base64'),
             // AES-GCM encrypted payload
-            iv:         iv.toString('base64'),
+            iv: iv.toString('base64'),
             ciphertext: encrypted.toString('base64'),
-            tag:        authTag.toString('base64'),
+            tag: authTag.toString('base64'),
         });
 
     } catch (encErr) {

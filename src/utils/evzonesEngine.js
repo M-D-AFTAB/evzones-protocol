@@ -15,24 +15,24 @@ const uint8ToBase64 = (uint8) => {
 };
 
 const readUint32 = (u8, o) =>
-    (u8[o] * 16777216) + (u8[o+1] * 65536) + (u8[o+2] * 256) + u8[o+3];
+    (u8[o] * 16777216) + (u8[o + 1] * 65536) + (u8[o + 2] * 256) + u8[o + 3];
 
 const readBoxType = (u8, o) =>
-    String.fromCharCode(u8[o+4], u8[o+5], u8[o+6], u8[o+7]);
+    String.fromCharCode(u8[o + 4], u8[o + 5], u8[o + 6], u8[o + 7]);
 
 // Detect codec from avcC box. Returns plain string like: avc1.4D401E
 const detectCodec = (uint8) => {
     for (let i = 0; i < uint8.length - 10; i++) {
-        if (uint8[i]===0x61 && uint8[i+1]===0x76 && uint8[i+2]===0x63 && uint8[i+3]===0x43) {
+        if (uint8[i] === 0x61 && uint8[i + 1] === 0x76 && uint8[i + 2] === 0x63 && uint8[i + 3] === 0x43) {
             // Uppercase required — Chrome rejects lowercase codec hex
-            const p = uint8[i+5].toString(16).padStart(2,'0').toUpperCase();
-            const c = uint8[i+6].toString(16).padStart(2,'0').toUpperCase();
-            const l = uint8[i+7].toString(16).padStart(2,'0').toUpperCase();
+            const p = uint8[i + 5].toString(16).padStart(2, '0').toUpperCase();
+            const c = uint8[i + 6].toString(16).padStart(2, '0').toUpperCase();
+            const l = uint8[i + 7].toString(16).padStart(2, '0').toUpperCase();
             const codec = 'avc1.' + p + c + l;
             console.log('[Engine] Detected codec:', codec);
             return codec;
         }
-        if (uint8[i]===0x68 && uint8[i+1]===0x76 && uint8[i+2]===0x63 && uint8[i+3]===0x43) {
+        if (uint8[i] === 0x68 && uint8[i + 1] === 0x76 && uint8[i + 2] === 0x63 && uint8[i + 3] === 0x43) {
             console.log('[Engine] Detected codec: HEVC');
             return 'hev1.1.6.L93.B0';
         }
@@ -69,8 +69,9 @@ const splitFragmentedMp4 = (uint8) => {
 // WebCrypto AES-CTR encrypt
 const aesEncrypt = async (plain, keyBytes, ivBytes) => {
     const ck = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['encrypt']);
+    // Change length: 64 → length: 128
     return new Uint8Array(await crypto.subtle.encrypt(
-        { name: 'AES-CTR', counter: ivBytes, length: 64 }, ck, plain
+        { name: 'AES-CTR', counter: ivBytes, length: 128 }, ck, plain
     ));
 };
 
@@ -98,7 +99,7 @@ export const processEvzonesVideo = async (file) => {
         'fragmented.mp4'
     ]);
 
-    const data  = await ffmpeg.readFile('fragmented.mp4');
+    const data = await ffmpeg.readFile('fragmented.mp4');
     const uint8 = new Uint8Array(data.buffer);
     console.log('[Engine] FFmpeg output:', uint8.length, 'bytes');
 
@@ -107,12 +108,12 @@ export const processEvzonesVideo = async (file) => {
 
     const keyBytes = crypto.getRandomValues(new Uint8Array(16));
     const kidBytes = crypto.getRandomValues(new Uint8Array(16));
-    const key = [...keyBytes].map(b => b.toString(16).padStart(2,'0')).join('');
-    const kid = [...kidBytes].map(b => b.toString(16).padStart(2,'0')).join('');
+    const key = [...keyBytes].map(b => b.toString(16).padStart(2, '0')).join('');
+    const kid = [...kidBytes].map(b => b.toString(16).padStart(2, '0')).join('');
 
     console.log('[Engine] Encrypting brick...');
     const encryptedBrick = await aesEncrypt(brickBytes, keyBytes, kidBytes);
-    const brainBase64    = uint8ToBase64(brainBytes);
+    const brainBase64 = uint8ToBase64(brainBytes);
 
     console.log('[Engine] Brain:', brainBytes.length, 'bytes | Brick:', encryptedBrick.length, 'bytes | Codec:', codec);
 
@@ -120,8 +121,8 @@ export const processEvzonesVideo = async (file) => {
 };
 
 export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
-    const VAULT_URL  = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
-    const codec      = asset.codec  || 'avc1.42E01E';
+    const VAULT_URL = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
+    const codec = asset.codec || 'avc1.42E01E';
     // Build the full mime string here in JS — do NOT embed it quoted inside the HTML template.
     // Instead we embed codec and container separately and assemble in the player.
     const brickBase64 = uint8ToBase64(asset.brick);
@@ -219,10 +220,11 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         }
 
         async function decryptAesCtr(encBytes, keyBytes, ivBytes) {
-            var ck = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['decrypt']);
-            return new Uint8Array(await crypto.subtle.decrypt(
-                { name: 'AES-CTR', counter: ivBytes, length: 64 }, ck, encBytes
-            ));
+        var ck = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['decrypt']);
+        return new Uint8Array(await crypto.subtle.decrypt(
+            // ✅ FIX: length: 128, not 64 — Chrome requires symmetric counter width
+            { name: 'AES-CTR', counter: ivBytes, length: 128 }, ck, encBytes
+        ));
         }
 
         // Hybrid decrypt: RSA unwraps AES session key, AES-GCM decrypts payload
