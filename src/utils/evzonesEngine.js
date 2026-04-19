@@ -27,9 +27,9 @@ const readBoxType = (u8, o) =>
 const detectMimeType = (uint8) => {
     for (let i = 0; i < uint8.length - 10; i++) {
         if (uint8[i]===0x61 && uint8[i+1]===0x76 && uint8[i+2]===0x63 && uint8[i+3]===0x43) {
-            const profile     = uint8[i+5].toString(16).padStart(2,'0');
-            const constraints = uint8[i+6].toString(16).padStart(2,'0');
-            const level       = uint8[i+7].toString(16).padStart(2,'0');
+            const profile     = uint8[i+5].toString(16).padStart(2,"0").toUpperCase();
+            const constraints = uint8[i+6].toString(16).padStart(2,"0").toUpperCase();
+            const level       = uint8[i+7].toString(16).padStart(2,"0").toUpperCase();
             const codec = `avc1.${profile}${constraints}${level}`;
             console.log('[Engine] Detected codec:', codec);
             return `video/mp4; codecs="${codec}"`;
