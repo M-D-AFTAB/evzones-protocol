@@ -21,8 +21,6 @@ export const processEvzonesVideo = async (file) => {
     const key = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     const kid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     
-    // We MUST use faststart to keep the moov (Brain) whole and at the front.
-    // We also explicitly declare the encryption scheme for the browser's EME.
     await ffmpeg.exec([
         '-i', 'input.mp4', 
         '-c', 'copy', 
@@ -36,9 +34,6 @@ export const processEvzonesVideo = async (file) => {
     const data = await ffmpeg.readFile('protected.mp4');
     const uint8 = new Uint8Array(data.buffer);
     
-    // THE FIX: Strict MP4 Box Walker
-    // This accurately reads the 4-byte size of each box and jumps over it,
-    // completely avoiding accidental string collisions in the encrypted video data.
     let mdatIndex = -1;
     let offset = 0;
     
@@ -51,7 +46,7 @@ export const processEvzonesVideo = async (file) => {
             break;
         }
         
-        if (size === 0 || size < 8) break; // Prevents infinite loop on malformed files
+        if (size === 0 || size < 8) break; 
         offset += size;
     }
 
@@ -96,9 +91,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         <p id="msg">Verifying Domain Authority...</p>
         <p id="debug" class="error-details"></p>
     </div>
-    
     <video id="player" controls controlsList="nodownload" muted playsinline preload="auto"></video>
-    
     <script>
         function hexToBase64Url(hex) {
             const bytes = new Uint8Array(hex.length / 2);
@@ -130,7 +123,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 const data = await res.json();
                 
-                // ClearKey EME Integration
                 player.addEventListener('encrypted', async (event) => {
                     console.log('🔒 CENC Encryption detected. Initializing ClearKey...');
                     try {
@@ -157,24 +149,28 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                     }
                 });
 
-                debugMsg.textContent = "Processing encrypted chunks...";
+                debugMsg.textContent = "Decoding Brick via Memory Stream...";
                 
-                // 1. Decode Brick securely
-                const binaryString = atob(BRICK_B64);
-                const brickArray = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) brickArray[i] = binaryString.charCodeAt(i); 
+                // 1. Decode Brick using Fetch (bypasses atob strictness and memory limits)
+                const cleanBrickB64 = BRICK_B64.replace(/[^A-Za-z0-9+/=]/g, '');
+                const brickRes = await fetch("data:application/octet-stream;base64," + cleanBrickB64);
+                const brickBuffer = await brickRes.arrayBuffer();
+                const brickArray = new Uint8Array(brickBuffer);
 
-                // 2. Decode Brain safely from Vault Base64 string
+                debugMsg.textContent = "Fetching Brain...";
+
+                // 2. Decode Brain using Fetch
                 let brainArray;
                 if (typeof data.brain === 'string') {
-                    const brainBinary = atob(data.brain);
-                    brainArray = new Uint8Array(brainBinary.length);
-                    for (let i = 0; i < brainBinary.length; i++) {
-                        brainArray[i] = brainBinary.charCodeAt(i);
-                    }
+                    const cleanBrainB64 = data.brain.replace(/[^A-Za-z0-9+/=]/g, '');
+                    const brainRes = await fetch("data:application/octet-stream;base64," + cleanBrainB64);
+                    const brainBuffer = await brainRes.arrayBuffer();
+                    brainArray = new Uint8Array(brainBuffer);
                 } else {
                     throw new Error("Invalid brain data format received from vault.");
                 }
+
+                debugMsg.textContent = "Stitching Video Matrix...";
 
                 // 3. Stitch perfectly
                 const finalVideo = new Uint8Array(brainArray.length + brickArray.length);
@@ -183,7 +179,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 debugMsg.textContent = "Decrypting via ClearKey...";
 
-                // Feeding exact codec hints to satisfy strict Firefox requirements
                 const videoBlob = new Blob([finalVideo], { type: 'video/mp4; codecs="avc1.4d401f, mp4a.40.2"' });
                 player.src = URL.createObjectURL(videoBlob);
                 status.style.display = 'none';
