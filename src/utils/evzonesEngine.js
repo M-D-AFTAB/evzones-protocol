@@ -9,9 +9,8 @@ const ffmpeg = new FFmpeg();
 const uint8ToBase64 = (uint8) => {
     let binary = '';
     const chunkSize = 8192;
-    for (let i = 0; i < uint8.length; i += chunkSize) {
+    for (let i = 0; i < uint8.length; i += chunkSize)
         binary += String.fromCharCode.apply(null, uint8.subarray(i, i + chunkSize));
-    }
     return btoa(binary);
 };
 
@@ -21,90 +20,58 @@ const readUint32 = (u8, o) =>
 const readBoxType = (u8, o) =>
     String.fromCharCode(u8[o+4], u8[o+5], u8[o+6], u8[o+7]);
 
-/**
- * Detect the correct SourceBuffer MIME + codec string by reading the avcC box.
- */
-const detectMimeType = (uint8) => {
+// Detect codec from avcC box. Returns plain string like: avc1.4D401E
+const detectCodec = (uint8) => {
     for (let i = 0; i < uint8.length - 10; i++) {
         if (uint8[i]===0x61 && uint8[i+1]===0x76 && uint8[i+2]===0x63 && uint8[i+3]===0x43) {
-            const profile     = uint8[i+5].toString(16).padStart(2,"0").toUpperCase();
-            const constraints = uint8[i+6].toString(16).padStart(2,"0").toUpperCase();
-            const level       = uint8[i+7].toString(16).padStart(2,"0").toUpperCase();
-            const codec = `avc1.${profile}${constraints}${level}`;
+            // Uppercase required — Chrome rejects lowercase codec hex
+            const p = uint8[i+5].toString(16).padStart(2,'0').toUpperCase();
+            const c = uint8[i+6].toString(16).padStart(2,'0').toUpperCase();
+            const l = uint8[i+7].toString(16).padStart(2,'0').toUpperCase();
+            const codec = 'avc1.' + p + c + l;
             console.log('[Engine] Detected codec:', codec);
-            return `video/mp4; codecs="${codec}"`;
+            return codec;
         }
         if (uint8[i]===0x68 && uint8[i+1]===0x76 && uint8[i+2]===0x63 && uint8[i+3]===0x43) {
             console.log('[Engine] Detected codec: HEVC');
-            return 'video/mp4; codecs="hev1.1.6.L93.B0"';
+            return 'hev1.1.6.L93.B0';
         }
     }
-    console.warn('[Engine] Could not detect codec, using safe fallback');
-    return 'video/mp4; codecs="avc1.42E01E"';
+    console.warn('[Engine] Codec not detected, using safe fallback');
+    return 'avc1.42E01E';
 };
 
-/**
- * Split a fragmented MP4 into:
- *   brainBytes = ftyp + moov  (initialization segment)
- *   brickBytes = moof + mdat … (all media fragments)
- */
+// Split fragmented MP4: brain = ftyp+moov, brick = moof+mdat...
 const splitFragmentedMp4 = (uint8) => {
-    let offset = 0;
-    let splitIndex = -1;
-    let foundMoov = false;
+    let offset = 0, splitIndex = -1, foundMoov = false;
     const log = [];
 
     while (offset < uint8.length - 8) {
         const size = readUint32(uint8, offset);
         const type = readBoxType(uint8, offset);
-        log.push(`  offset=${offset} type=${type} size=${size}`);
-
+        log.push('  offset=' + offset + ' type=' + type + ' size=' + size);
         if (type === 'moov') foundMoov = true;
-
-        if (type === 'moof' || type === 'mdat') {
-            splitIndex = offset;
-            break;
-        }
+        if (type === 'moof' || type === 'mdat') { splitIndex = offset; break; }
         if (size < 8) break;
         offset += size;
     }
 
     console.log('[Engine] Box walk:\n' + log.join('\n'));
 
-    if (splitIndex === -1) {
-        throw new Error(
-            'Failed to locate moof/mdat boundary. ' +
-            (foundMoov
-                ? 'moov found but no moof — video may not be fragmented correctly.'
-                : 'moov not found — FFmpeg output may be corrupt or unsupported format.')
-        );
-    }
+    if (splitIndex === -1) throw new Error(
+        'Failed to locate moof/mdat. ' +
+        (foundMoov ? 'moov found but no moof.' : 'moov not found — FFmpeg output corrupt?')
+    );
 
-    return {
-        brainBytes: uint8.slice(0, splitIndex),
-        brickBytes: uint8.slice(splitIndex),
-    };
+    return { brainBytes: uint8.slice(0, splitIndex), brickBytes: uint8.slice(splitIndex) };
 };
 
-// ─── WebCrypto AES-CTR Encryption ───────────────────────────────────────────
-// FFmpeg.wasm 0.12.x is NOT compiled with encryption support — its
-// -encryption_scheme flag silently produces un-encrypted output that is
-// structurally broken (no valid PSSH/tenc boxes), causing the moof/mdat
-// boundary walk to fail.
-//
-// Solution: Use FFmpeg only for fragmentation, then encrypt the brick
-// ourselves with WebCrypto AES-CTR. The player decrypts with the same
-// key+kid fetched from the vault — no EME/DRM stack required.
-
-const encryptBytes = async (plain, keyBytes, ivBytes) => {
-    const cryptoKey = await crypto.subtle.importKey(
-        'raw', keyBytes, { name: 'AES-CTR' }, false, ['encrypt']
-    );
-    const result = await crypto.subtle.encrypt(
-        { name: 'AES-CTR', counter: ivBytes, length: 64 },
-        cryptoKey, plain
-    );
-    return new Uint8Array(result);
+// WebCrypto AES-CTR encrypt
+const aesEncrypt = async (plain, keyBytes, ivBytes) => {
+    const ck = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['encrypt']);
+    return new Uint8Array(await crypto.subtle.encrypt(
+        { name: 'AES-CTR', counter: ivBytes, length: 64 }, ck, plain
+    ));
 };
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -112,63 +79,53 @@ const encryptBytes = async (plain, keyBytes, ivBytes) => {
 export const processEvzonesVideo = async (file) => {
     if (!ffmpeg.loaded) await ffmpeg.load();
 
-    console.log('[Engine] Writing input file...');
+    console.log('[Engine] Writing input...');
     await ffmpeg.writeFile('input.mp4', await fetchFile(file));
 
-    // Step 1: Fragment with FFmpeg (no encryption flags — not supported in wasm build)
-    console.log('[Engine] Fragmenting video...');
+    console.log('[Engine] Fragmenting...');
     await ffmpeg.exec([
-        '-i', 'input.mp4',
-        '-c', 'copy',
+        '-i', 'input.mp4', '-c', 'copy',
         '-movflags', 'faststart+frag_keyframe+empty_moov+default_base_moof',
         'fragmented.mp4'
     ]);
 
     const data  = await ffmpeg.readFile('fragmented.mp4');
     const uint8 = new Uint8Array(data.buffer);
-    console.log('[Engine] FFmpeg output size:', uint8.length, 'bytes');
+    console.log('[Engine] FFmpeg output:', uint8.length, 'bytes');
 
-    // Step 2: Split Brain / Brick
     const { brainBytes, brickBytes } = splitFragmentedMp4(uint8);
-    const mimeType = detectMimeType(brainBytes);
+    const codec = detectCodec(brainBytes);
 
-    // Step 3: Generate random key + kid, encrypt brick
     const keyBytes = crypto.getRandomValues(new Uint8Array(16));
     const kidBytes = crypto.getRandomValues(new Uint8Array(16));
     const key = [...keyBytes].map(b => b.toString(16).padStart(2,'0')).join('');
     const kid = [...kidBytes].map(b => b.toString(16).padStart(2,'0')).join('');
 
-    console.log('[Engine] Encrypting brick with WebCrypto AES-CTR...');
-    const encryptedBrick = await encryptBytes(brickBytes, keyBytes, kidBytes);
+    console.log('[Engine] Encrypting brick...');
+    const encryptedBrick = await aesEncrypt(brickBytes, keyBytes, kidBytes);
+    const brainBase64    = uint8ToBase64(brainBytes);
 
-    const brainBase64 = uint8ToBase64(brainBytes);
+    console.log('[Engine] Brain:', brainBytes.length, 'bytes | Brick:', encryptedBrick.length, 'bytes | Codec:', codec);
 
-    console.log('[Engine] Brain (bytes):', brainBytes.length, '| Brain (base64):', brainBase64.length);
-    console.log('[Engine] Brick (plain):', brickBytes.length, '| Brick (encrypted):', encryptedBrick.length);
-    console.log('[Engine] MIME:', mimeType);
-
-    return {
-        brain:    brainBase64,       // base64 string → sent to vault
-        brick:    encryptedBrick,    // Uint8Array   → embedded in HTML
-        key,
-        kid,
-        fileName: file.name,
-        mimeType
-    };
+    return { brain: brainBase64, brick: encryptedBrick, key, kid, fileName: file.name, codec };
 };
 
 export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
-    const VAULT_URL = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
-    const mimeType  = asset.mimeType || 'video/mp4; codecs="avc1.42E01E"';
-
+    const VAULT_URL  = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
+    const codec      = asset.codec  || 'avc1.42E01E';
+    // Build the full mime string here in JS — do NOT embed it quoted inside the HTML template.
+    // Instead we embed codec and container separately and assemble in the player.
     const brickBase64 = uint8ToBase64(asset.brick);
 
-    // Escape inner double-quotes so the MIME string is safe inside a JS "..." literal
-    // e.g. video/mp4; codecs="avc1.4d401e"  →  video/mp4; codecs=\"avc1.4d401e\"
-    const safeMime = mimeType.replace(/"/g, '\\"');
+    console.log('[Engine] Smart Asset:', receivedId, '| Codec:', codec, '| Brick B64:', brickBase64.length);
 
-    console.log('[Engine] Generating Smart Asset:', receivedId);
-    console.log('[Engine] MIME:', mimeType, '| Brick B64:', brickBase64.length);
+    // ── Security upgrade: RSA key wrapping ──────────────────────────────────
+    // The player generates a one-time RSA keypair in RAM.
+    // It sends the PUBLIC key to the vault with the unlock request.
+    // The vault encrypts (brain + key + kid) with that public key before sending.
+    // Result: the network tab shows only opaque RSA ciphertext — not the raw key.
+    // A devtools observer cannot extract the AES key without the RSA private key,
+    // which never leaves the browser tab's memory.
 
     const htmlTemplate = `<!DOCTYPE html>
 <html lang="en">
@@ -216,121 +173,202 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
     </style>
 </head>
 <body>
-    <div id="status" class="lock-screen">
-        <h2>🛡️ EVZONES PROTOCOL ACTIVE</h2>
-        <p id="msg">Handshake Ready. Secure Connection Established.</p>
-        <button id="start-btn">INITIALIZE DECRYPTION</button>
-        <p id="debug"></p>
+    <div id='status' class='lock-screen'>
+        <h2>&#x1F6E1;&#xFE0F; EVZONES PROTOCOL ACTIVE</h2>
+        <p id='msg'>Handshake Ready. Secure Connection Established.</p>
+        <button id='start-btn'>INITIALIZE DECRYPTION</button>
+        <p id='debug'></p>
     </div>
-    <video id="player" controls controlsList="nodownload" playsinline></video>
+    <video id='player' controls controlsList='nodownload' playsinline></video>
 
     <script>
-        const BRICK_B64 = "${brickBase64}";
-        const ASSET_ID  = "${receivedId}";
-        const VAULT_URL = "${VAULT_URL}";
-        const MIME_TYPE = "${safeMime}";
+        // Embedded payload — encrypted brick and routing constants
+        var BRICK_B64  = '${brickBase64}';
+        var ASSET_ID   = '${receivedId}';
+        var VAULT_URL  = '${VAULT_URL}';
+        var CODEC      = '${codec}';
+        var MIME_TYPE  = 'video/mp4; codecs="' + CODEC + '"';
 
+        // ── Helpers ───────────────────────────────────────────────────────
         function hexToBytes(hex) {
-            const b = new Uint8Array(hex.length / 2);
-            for (let i = 0; i < hex.length; i += 2)
-                b[i/2] = parseInt(hex.substring(i, i+2), 16);
+            var b = new Uint8Array(hex.length / 2);
+            for (var i = 0; i < hex.length; i += 2) b[i/2] = parseInt(hex.substr(i, 2), 16);
             return b;
         }
 
         function base64ToBytes(b64) {
-            const bin = atob(b64.replace(/\\s/g,''));
-            const out = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            var bin = atob(b64.replace(/\\s/g, ''));
+            var out = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
             return out;
         }
 
+        function bytesToBase64(bytes) {
+            var bin = '';
+            for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            return btoa(bin);
+        }
+
         async function decryptAesCtr(encBytes, keyBytes, ivBytes) {
-            const ck = await crypto.subtle.importKey(
-                'raw', keyBytes, { name: 'AES-CTR' }, false, ['decrypt']
-            );
+            var ck = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['decrypt']);
             return new Uint8Array(await crypto.subtle.decrypt(
-                { name: 'AES-CTR', counter: ivBytes, length: 64 },
-                ck, encBytes
+                { name: 'AES-CTR', counter: ivBytes, length: 64 }, ck, encBytes
             ));
         }
 
+        // Hybrid decrypt: RSA unwraps AES session key, AES-GCM decrypts payload
+        async function hybridDecrypt(privateKey, payload) {
+            // 1. RSA-OAEP unwrap the session key
+            var wrappedKey = base64ToBytes(payload.wrappedKey);
+            var sessionKey = await crypto.subtle.decrypt(
+                { name: 'RSA-OAEP' }, privateKey, wrappedKey
+            );
+            // 2. AES-256-GCM decrypt the payload
+            var aesKey = await crypto.subtle.importKey(
+                'raw', sessionKey, { name: 'AES-GCM' }, false, ['decrypt']
+            );
+            var iv         = base64ToBytes(payload.iv);
+            var ciphertext = base64ToBytes(payload.ciphertext);
+            var tag        = base64ToBytes(payload.tag);
+            // Concatenate ciphertext + tag (WebCrypto AES-GCM expects them together)
+            var combined = new Uint8Array(ciphertext.length + tag.length);
+            combined.set(ciphertext, 0);
+            combined.set(tag, ciphertext.length);
+            var plain = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: iv, tagLength: 128 }, aesKey, combined
+            );
+            return new TextDecoder().decode(plain);
+        }
+
         function appendBuffer(sb, chunk) {
-            return new Promise((resolve, reject) => {
-                const onDone = () => { sb.removeEventListener('error', onErr); resolve(); };
-                const onErr  = () => {
+            return new Promise(function(resolve, reject) {
+                function onDone() { sb.removeEventListener('error', onErr); resolve(); }
+                function onErr()  {
                     sb.removeEventListener('updateend', onDone);
-                    reject(new Error('SourceBuffer error, code: ' + (sb.error ? sb.error.code : '?')));
-                };
+                    reject(new Error('SourceBuffer error, code: ' + (sb.error ? sb.error.code : 'null — likely codec rejected by browser. Codec: ' + MIME_TYPE)));
+                }
                 sb.addEventListener('updateend', onDone, { once: true });
                 sb.addEventListener('error',     onErr,  { once: true });
                 sb.appendBuffer(chunk);
             });
         }
 
-        document.getElementById('start-btn').addEventListener('click', async function () {
+        // ── Main ──────────────────────────────────────────────────────────
+        document.getElementById('start-btn').addEventListener('click', async function() {
             this.disabled = true;
-            const msgEl   = document.getElementById('msg');
-            const debugEl = document.getElementById('debug');
-            const player  = document.getElementById('player');
-            const step = (n, t) => { debugEl.textContent = 'Step ' + n + ': ' + t; console.log(n, t); };
+            var msgEl   = document.getElementById('msg');
+            var debugEl = document.getElementById('debug');
+            var player  = document.getElementById('player');
+
+            function step(n, t) {
+                console.log(n, t);
+                debugEl.textContent = 'Step ' + n + ': ' + t;
+            }
 
             try {
-                step(1, 'Connecting to vault...');
+                // Step 1: Generate one-time RSA keypair (never leaves this tab)
+                step(1, 'Generating session keypair...');
+                var rsaKeyPair = await crypto.subtle.generateKey(
+                    {
+                        name: 'RSA-OAEP',
+                        modulusLength: 2048,
+                        publicExponent: new Uint8Array([1, 0, 1]),
+                        hash: 'SHA-256'
+                    },
+                    false,   // private key: NOT extractable
+                    ['decrypt']
+                );
+
+                // Export public key as base64 to send to vault
+                var pubKeyDer    = await crypto.subtle.exportKey('spki', rsaKeyPair.publicKey);
+                var pubKeyB64    = bytesToBase64(new Uint8Array(pubKeyDer));
+
+                // Step 2: Vault handshake — send public key, receive RSA-encrypted payload
+                step(2, 'Secure handshake with vault...');
                 msgEl.innerHTML = "Verifying Domain Authority... <span class='spinner'></span>";
 
-                const res = await fetch(VAULT_URL + '/api/unlock?assetID=' + ASSET_ID, { method: 'POST' });
-                if (!res.ok) throw new Error('Vault denied: ' + res.status);
-                const auth = await res.json();
-                if (!auth.brain || !auth.key || !auth.kid)
-                    throw new Error('Incomplete auth data from vault');
+                var res = await fetch(
+                    VAULT_URL + '/api/unlock?assetID=' + ASSET_ID,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ publicKey: pubKeyB64 })
+                    }
+                );
+                if (!res.ok) throw new Error('Vault denied: ' + res.status + ' ' + res.statusText);
 
-                step(2, 'Decrypting content with WebCrypto...');
-                const keyBytes = hexToBytes(auth.key);
-                const kidBytes = hexToBytes(auth.kid);
-                const brainBytes     = base64ToBytes(auth.brain);
-                const encryptedBrick = base64ToBytes(BRICK_B64);
-                const brickBytes     = await decryptAesCtr(encryptedBrick, keyBytes, kidBytes);
+                var payload = await res.json();
+                if (!payload.wrappedKey || !payload.ciphertext)
+                    throw new Error('Vault did not return encrypted payload');
+
+                // Step 3: Hybrid-decrypt payload — RSA unwraps session key, AES-GCM decrypts body
+                step(3, 'Decrypting vault payload (RSA+AES-GCM)...');
+                var authJson = await hybridDecrypt(rsaKeyPair.privateKey, payload);
+                var auth     = JSON.parse(authJson);
+
+                if (!auth.brain || !auth.key || !auth.kid)
+                    throw new Error('Incomplete auth data after decryption');
+
+                console.log('Auth decrypted — brain:', auth.brain.length, 'chars');
+
+                // Step 4: Decrypt brick with AES-CTR
+                step(4, 'Decrypting media with AES-CTR...');
+                var keyBytes     = hexToBytes(auth.key);
+                var kidBytes     = hexToBytes(auth.kid);
+                var brainBytes   = base64ToBytes(auth.brain);
+                var encBrick     = base64ToBytes(BRICK_B64);
+                var brickBytes   = await decryptAesCtr(encBrick, keyBytes, kidBytes);
                 console.log('Brain:', brainBytes.length, 'bytes | Brick:', brickBytes.length, 'bytes');
 
-                step(3, 'Setting up MediaSource...');
-                if (!MediaSource.isTypeSupported(MIME_TYPE))
-                    throw new Error('Codec not supported: ' + MIME_TYPE);
+                // Step 5: Validate codec before touching MediaSource
+                step(5, 'Validating codec: ' + MIME_TYPE);
+                if (!MediaSource.isTypeSupported(MIME_TYPE)) {
+                    throw new Error('Codec not supported by this browser: ' + MIME_TYPE);
+                }
+                console.log('Codec accepted by browser:', MIME_TYPE);
 
-                const ms = new MediaSource();
+                // Step 6: Init MediaSource + SourceBuffer
+                step(6, 'Initializing MediaSource...');
+                var ms = new MediaSource();
                 player.src = URL.createObjectURL(ms);
-                await new Promise((res, rej) => {
+                await new Promise(function(res, rej) {
                     ms.addEventListener('sourceopen', res, { once: true });
                     ms.addEventListener('error',      rej, { once: true });
                 });
 
-                const sb = ms.addSourceBuffer(MIME_TYPE);
+                var sb = ms.addSourceBuffer(MIME_TYPE);
+                console.log('SourceBuffer created with:', MIME_TYPE);
 
-                step(4, 'Appending initialization segment...');
+                // Step 7: Append brain (init segment)
+                step(7, 'Appending init segment...');
                 await appendBuffer(sb, brainBytes);
+                console.log('Brain appended OK');
 
-                step(5, 'Streaming media fragments...');
-                const CHUNK = 512 * 1024;
-                for (let i = 0; i < brickBytes.length; i += CHUNK) {
+                // Step 8: Stream brick in 512 KB chunks
+                step(8, 'Streaming media...');
+                var CHUNK = 512 * 1024;
+                for (var i = 0; i < brickBytes.length; i += CHUNK) {
                     if (ms.readyState !== 'open') break;
                     await appendBuffer(sb, brickBytes.slice(i, i + CHUNK));
                 }
                 if (ms.readyState === 'open') ms.endOfStream();
+                console.log('All data appended');
 
-                step(6, '✓ Authorized. Starting playback...');
-                setTimeout(() => {
+                step(9, 'Authorized. Starting playback...');
+                setTimeout(function() {
                     document.getElementById('status').style.display = 'none';
                     player.style.display = 'block';
-                    player.play().catch(() => {
-                        debugEl.textContent = 'Click video to play (autoplay policy)';
+                    player.play().catch(function() {
+                        debugEl.textContent = 'Click the video to play (autoplay policy)';
                     });
                 }, 300);
 
-            } catch (err) {
+            } catch(err) {
                 console.error('Playback error:', err);
-                msgEl.innerHTML = "<span style='color:#ff3333'>⚠ ACCESS DENIED</span>";
+                msgEl.innerHTML = "<span style='color:#ff3333'>&#x26A0; ACCESS DENIED</span>";
                 debugEl.textContent = 'Error: ' + err.message;
                 debugEl.style.color = '#ff3333';
-                document.getElementById('start-btn').disabled = false;
+                document.getElementById('start-btn').disabled  = false;
                 document.getElementById('start-btn').textContent = 'RETRY';
             }
         });
