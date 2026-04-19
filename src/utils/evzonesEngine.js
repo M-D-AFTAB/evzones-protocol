@@ -21,7 +21,6 @@ export const processEvzonesVideo = async (file) => {
     const key = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     const kid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     
-    // EME explicitly requires Fragmented MP4s. We force fragments with empty_moov.
     await ffmpeg.exec([
         '-i', 'input.mp4', 
         '-c', 'copy', 
@@ -35,9 +34,6 @@ export const processEvzonesVideo = async (file) => {
     const data = await ffmpeg.readFile('protected.mp4');
     const uint8 = new Uint8Array(data.buffer);
     
-    // Strict MP4 Box Walker: Slicing at the first 'moof' box
-    // The Brain gets the ftyp & moov (DRM initialization and track maps).
-    // The Brick gets the moof & mdat chunks (The encrypted media).
     let splitIndex = -1;
     let offset = 0;
     
@@ -94,21 +90,36 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
     </div>
     <video id="player" controls controlsList="nodownload" muted playsinline preload="auto"></video>
     <script>
-        // EME JWK Key Formatter
         function hexToBase64Url(hex) {
             const bytes = new Uint8Array(hex.length / 2);
             for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
             return btoa(String.fromCharCode.apply(null, bytes)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
         }
 
-        // Bulletproof Base64 Decoder: Bypasses data URI limits and avoids InvalidCharacter errors
+        // Pure Math Decoder: Completely bypasses atob() crashes and fetch() data limits
         function decodeB64(b64) {
-            let clean = b64.replace(/-/g, '+').replace(/_/g, '/').replace(/[\\r\\n\\s]+/g, '');
-            while (clean.length % 4) clean += '='; // Guarantee perfect padding
-            const bin = window.atob(clean);
-            const buf = new Uint8Array(bin.length);
-            for(let i=0; i<bin.length; i++) buf[i] = bin.charCodeAt(i);
-            return buf;
+            const str = b64.replace(/[^A-Za-z0-9+/=]/g, "");
+            const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            const lookup = new Uint8Array(256);
+            for (let i = 0; i < chars.length; i++) lookup[chars.charCodeAt(i)] = i;
+
+            let len = str.length;
+            if (str[len - 1] === "=") len--;
+            if (str[len - 1] === "=") len--;
+
+            const buffer = new Uint8Array(Math.floor((len * 3) / 4));
+            let p = 0;
+            for (let i = 0; i < len; i += 4) {
+                let e1 = lookup[str.charCodeAt(i)];
+                let e2 = lookup[str.charCodeAt(i + 1)];
+                let e3 = lookup[str.charCodeAt(i + 2) || 0];
+                let e4 = lookup[str.charCodeAt(i + 3) || 0];
+
+                buffer[p++] = (e1 << 2) | (e2 >> 4);
+                if (p < buffer.length) buffer[p++] = ((e2 & 15) << 4) | (e3 >> 2);
+                if (p < buffer.length) buffer[p++] = ((e3 & 3) << 6) | (e4 & 63);
+            }
+            return buffer;
         }
 
         (async function unlock() {
@@ -132,7 +143,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 const data = await res.json();
                 
-                // ClearKey EME Listener
                 player.addEventListener('encrypted', async (event) => {
                     console.log('🔒 CENC Encryption detected. Initializing ClearKey...');
                     try {
@@ -159,7 +169,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 debugMsg.textContent = "Decoding Matrix...";
                 
-                // Decode cleanly using the custom robust function
                 const brickArray = decodeB64(BRICK_B64);
                 
                 let brainStr = typeof data.brain === 'string' ? data.brain : (data.brain.data || '');
@@ -174,7 +183,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 debugMsg.textContent = "Decrypting via ClearKey...";
 
-                // Feed the perfectly formed fMP4 to the browser
                 const videoBlob = new Blob([finalVideo], { type: 'video/mp4' });
                 player.src = URL.createObjectURL(videoBlob);
                 status.style.display = 'none';
