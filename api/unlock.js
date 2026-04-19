@@ -94,16 +94,16 @@ export default async function handler(req, res) {
   }
 
 
-console.log('✅ Authorized access granted');
+  console.log('✅ Authorized access granted');
 
-// Convert the Supabase Buffer to a clean Base64 string
-const brainBase64 = Buffer.from(asset.brain).toString('base64');
+  const brainBuffer = Buffer.from(asset.brain);
+  const brainBase64 = brainBuffer.toString('base64');
 
-return res.status(200).json({
-    brain: brainBase64,
+  return res.status(200).json({
+    brain: brainBase64, 
     key: asset.key,
     kid: asset.kid,
     success: true
-});
+  });
 
 }
