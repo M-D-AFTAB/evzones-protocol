@@ -26,7 +26,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
     if (!receivedId) throw new Error("Missing ID for Smart Asset");
     
     // Use environment variable or fallback to production URL
-    const VAULT_URL = vaultBaseUrl || import.meta.env.VITE_VAULT_URL || 'https://your-project.vercel.app';
+    const VAULT_URL = vaultBaseUrl || import.meta.env.VITE_VAULT_URL || 'https://evzones-protocol.vercel.app';
     
     const brickBlob = new Blob([asset.brick], { type: 'application/octet-stream' });
 
