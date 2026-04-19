@@ -425,17 +425,17 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 });
 
                 var sb = ms.addSourceBuffer(MIME_TYPE);
-                // Chrome MSE requires 'segments' mode for fragmented MP4 (ftyp+moov / moof+mdat).
-                // Firefox defaults to 'segments' automatically; Chrome does not.
-                sb.mode = 'segments';
+                // DON'T set sb.mode here — let Chrome use its default for this mime type.
+                // Setting 'segments' mode immediately after addSourceBuffer can throw in Chrome
+                // before the buffer is ready, causing the first appendBuffer to fail silently.
                 console.log('SourceBuffer created, mode:', sb.mode);
 
-                // Diagnostic: log first 16 bytes of brain to confirm ftyp header
-                var brainHex = Array.from(brainBytes.slice(0, 16))
-                    .map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' ');
-                console.log('Brain header (hex):', brainHex);
-                // Valid ftyp starts with: ?? ?? ?? ?? 66 74 79 70  (size + "ftyp")
-                // Valid moov starts with: ?? ?? ?? ?? 6d 6f 6f 76  (size + "moov")
+                // Step 7: Append brain (init segment = ftyp + moov)
+                step(7, 'Appending init segment...');
+                // Wait for SourceBuffer to be ready before appending
+                await new Promise(function(r) { setTimeout(r, 0); });
+                await appendBuffer(sb, brainBytes);
+                console.log('Brain appended OK');
 
                 // Step 7: Append brain (init segment = ftyp + moov)
                 step(7, 'Appending init segment...');
