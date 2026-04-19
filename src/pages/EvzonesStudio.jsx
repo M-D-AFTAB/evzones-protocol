@@ -81,7 +81,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         <p id="msg">Verifying Domain Authority...</p>
         <p id="debug" class="error-details"></p>
     </div>
-    <video id="player" controls controlsList="nodownload"></video>
+    <video id="player" controls controlsList="nodownload" muted playsinline preload="auto"></video>
     <script>
         function hexToBase64Url(hex) {
             const bytes = new Uint8Array(hex.length / 2);
@@ -171,7 +171,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 debugMsg.textContent = "Decrypting via ClearKey...";
 
-                const videoBlob = new Blob([finalVideo], { type: 'video/mp4' });
+                const videoBlob = new Blob([finalVideo], { type: 'video/mp4; codecs="avc1.4d401f, mp4a.40.2"' });
                 player.src = URL.createObjectURL(videoBlob);
                 status.style.display = 'none';
                 player.style.display = 'block';
