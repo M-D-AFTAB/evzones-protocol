@@ -6,10 +6,9 @@ const ffmpeg = new FFmpeg();
 
 const uint8ToBase64 = (uint8) => {
     let binary = '';
-    const chunkSize = 8192; 
-    for (let i = 0; i < uint8.length; i += chunkSize) {
-        const chunk = uint8.subarray(i, i + chunkSize);
-        binary += String.fromCharCode.apply(null, chunk);
+    const len = uint8.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(uint8[i]);
     }
     return btoa(binary);
 };
@@ -17,36 +16,36 @@ const uint8ToBase64 = (uint8) => {
 export const processEvzonesVideo = async (file) => {
     if (!ffmpeg.loaded) await ffmpeg.load();
     await ffmpeg.writeFile('input.mp4', await fetchFile(file));
-    
+
     const key = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
     const kid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
-    
-   await ffmpeg.exec([
-    '-i', 'input.mp4', 
-    '-c', 'copy', 
-    // Optimization: empty_moov is critical for MSE streaming
-    '-movflags', 'faststart+frag_keyframe+empty_moov+default_base_moof',
-    '-encryption_scheme', 'cenc-aes-ctr',
-    '-encryption_key', key, 
-    '-encryption_kid', kid, 
-    'protected.mp4'
-]);
-    
+
+    await ffmpeg.exec([
+        '-i', 'input.mp4',
+        '-c', 'copy',
+        // Optimization: empty_moov is critical for MSE streaming
+        '-movflags', 'faststart+frag_keyframe+empty_moov+default_base_moof',
+        '-encryption_scheme', 'cenc-aes-ctr',
+        '-encryption_key', key,
+        '-encryption_kid', kid,
+        'protected.mp4'
+    ]);
+
     const data = await ffmpeg.readFile('protected.mp4');
     const uint8 = new Uint8Array(data.buffer);
-    
+
     let splitIndex = -1;
     let offset = 0;
-    
+
     while (offset < uint8.length) {
-        const size = (uint8[offset] * 16777216) + (uint8[offset+1] * 65536) + (uint8[offset+2] * 256) + uint8[offset+3];
-        const type = String.fromCharCode(uint8[offset+4], uint8[offset+5], uint8[offset+6], uint8[offset+7]);
-        
+        const size = (uint8[offset] * 16777216) + (uint8[offset + 1] * 65536) + (uint8[offset + 2] * 256) + uint8[offset + 3];
+        const type = String.fromCharCode(uint8[offset + 4], uint8[offset + 5], uint8[offset + 6], uint8[offset + 7]);
+
         if (type === 'moof' || type === 'mdat') {
             splitIndex = offset;
             break;
         }
-        if (size === 0 || size < 8) break; 
+        if (size === 0 || size < 8) break;
         offset += size;
     }
 
@@ -66,7 +65,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         const reader = new FileReader();
         reader.onload = (e) => {
             const base64Brick = e.target.result.split(',')[1];
-            
+
             const htmlTemplate = `
 <!DOCTYPE html>
 <html lang="en">
@@ -100,9 +99,15 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
             return btoa(String.fromCharCode.apply(null, bytes)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
         }
 
-        // Optimized Generator: Decodes B64 in small chunks to save RAM
+       // This version strips whitespace and potential data-uri prefixes automatically
         function* chunkDecoder(b64, chunkSize = 1024 * 1024) {
-            const binary = atob(b64);
+            // 1. Clean the string (Remove prefixes and whitespace)
+            const cleanB64 = b64.includes(',') ? b64.split(',')[1] : b64.replace(/\s/g, '');
+            
+            // 2. Decode the whole string safely
+            const binary = atob(cleanB64); 
+            
+            // 3. Yield slices to the MediaSource buffer
             for (let i = 0; i < binary.length; i += chunkSize) {
                 const chunk = binary.slice(i, i + chunkSize);
                 const bytes = new Uint8Array(chunk.length);
@@ -146,7 +151,11 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                     });
 
                     // 4. Feed the Brain (The Header)
-                    const brainBinary = atob(authData.brain);
+                    // Ensure brain is a clean string regardless of server response format
+                    let brainRaw = typeof authData.brain === 'string' ? authData.brain : JSON.stringify(authData.brain);
+                    const brainClean = brainRaw.replace(/[^A-Za-z0-9+/=]/g, "");
+
+                    const brainBinary = atob(brainClean);
                     const brainArray = new Uint8Array(brainBinary.length);
                     for(let i=0; i<brainBinary.length; i++) brainArray[i] = brainBinary.charCodeAt(i);
                     sb.appendBuffer(brainArray);
