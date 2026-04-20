@@ -521,8 +521,9 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 var CHUNK = /Mobi|Android/i.test(navigator.userAgent) ? 512 * 1024 : 2 * 1024 * 1024;
 
                 // Decrypt and append first chunk together with brain
+                // Step 7 first chunk — counter starts at 0 (kidBytes as-is)
                 var firstEncChunk = encBrick.slice(0, Math.min(CHUNK, encBrick.length));
-                var firstChunk    = await decryptAesCtr(firstEncChunk, keyBytes, kidBytes);
+                var firstChunk    = await decryptAesCtr(firstEncChunk, keyBytes, new Uint8Array(kidBytes));
                 var initPlusFirst = new Uint8Array(brainBytes.length + firstChunk.length);
                 initPlusFirst.set(brainBytes, 0);
                 initPlusFirst.set(firstChunk, brainBytes.length);
@@ -530,20 +531,17 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 console.log('Brain + first fragment appended OK');
 
                 step(8, 'Streaming remaining media...');
-                // Target buffer: keep 3 chunks ahead, pause if too much buffered
-                var TARGET_BUFFER = 30; // seconds ahead to buffer
+                var TARGET_BUFFER = 30;
                 for (var i = CHUNK; i < encBrick.length; i += CHUNK) {
                     if (ms.readyState !== 'open') break;
 
-                    // Throttle: if we have enough buffered, wait for it to drain
                     if (player.buffered.length > 0) {
                         var bufferedAhead = player.buffered.end(player.buffered.length - 1) - player.currentTime;
                         if (bufferedAhead > TARGET_BUFFER) {
                             await new Promise(function(r) {
                                 player.addEventListener('timeupdate', function check() {
                                     var ahead = player.buffered.length > 0
-                                        ? player.buffered.end(player.buffered.length - 1) - player.currentTime
-                                        : 0;
+                                        ? player.buffered.end(player.buffered.length - 1) - player.currentTime : 0;
                                     if (ahead < TARGET_BUFFER / 2) {
                                         player.removeEventListener('timeupdate', check);
                                         r();
@@ -553,13 +551,21 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                         }
                     }
 
-                    // Decrypt only this chunk — previous chunk is already GC-able
                     var encChunk = encBrick.slice(i, Math.min(i + CHUNK, encBrick.length));
-                    var chunk    = await decryptAesCtr(encChunk, keyBytes, kidBytes);
+
+                    // ✅ AES-CTR counter must advance with byte offset — counter is in 16-byte blocks
+                    var counter = new Uint8Array(kidBytes); // copy of original IV
+                    var blockOffset = i / 16; // how many 16-byte blocks into the stream we are
+                    // Add blockOffset to the counter (big-endian 128-bit addition)
+                    for (var b = 15; b >= 0 && blockOffset > 0; b--) {
+                        var sum = counter[b] + (blockOffset & 0xff);
+                        counter[b] = sum & 0xff;
+                        blockOffset = (blockOffset >>> 8) + (sum >>> 8);
+                    }
+
+                    var chunk = await decryptAesCtr(encChunk, keyBytes, counter);
                     await appendBuffer(sb, chunk);
                 }
-                if (ms.readyState === 'open') ms.endOfStream();
-                console.log('All data appended');
 
                 step(9, 'Authorized. Starting playback...');
                 setTimeout(function() {
