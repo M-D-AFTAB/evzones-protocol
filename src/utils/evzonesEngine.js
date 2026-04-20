@@ -20,6 +20,7 @@ const readUint32 = (u8, o) =>
 const readBoxType = (u8, o) =>
     String.fromCharCode(u8[o + 4], u8[o + 5], u8[o + 6], u8[o + 7]);
 
+// Patch ftyp major brand to 'isom' — Chrome MSE rejects 'iso5'
 const patchFtypBrand = (uint8) => {
     if (uint8[4] === 0x66 && uint8[5] === 0x74 && uint8[6] === 0x79 && uint8[7] === 0x70) {
         const patched = new Uint8Array(uint8);
@@ -33,6 +34,7 @@ const patchFtypBrand = (uint8) => {
     return uint8;
 };
 
+// Surgically remove udta box — Chrome aborts on malformed meta inside udta
 const removeUdtaFromBrain = (uint8) => {
     let offset = 0;
     while (offset < uint8.length - 8) {
@@ -53,7 +55,7 @@ const removeUdtaFromBrain = (uint8) => {
                     out[offset+1] = (newMoovSize >>> 16) & 0xff;
                     out[offset+2] = (newMoovSize >>> 8)  & 0xff;
                     out[offset+3] =  newMoovSize         & 0xff;
-                    console.log('[Engine] udta removed from brain (' + iSize + ' bytes stripped)');
+                    console.log('[Engine] udta removed (' + iSize + ' bytes stripped)');
                     return out;
                 }
                 if (iSize < 8) break;
@@ -67,25 +69,43 @@ const removeUdtaFromBrain = (uint8) => {
     return uint8;
 };
 
+// Detect video codec from avcC box → e.g. "avc1.4D401E"
 const detectCodec = (uint8) => {
     for (let i = 0; i < uint8.length - 10; i++) {
-        if (uint8[i] === 0x61 && uint8[i+1] === 0x76 && uint8[i+2] === 0x63 && uint8[i+3] === 0x43) {
+        if (uint8[i]===0x61 && uint8[i+1]===0x76 && uint8[i+2]===0x63 && uint8[i+3]===0x43) {
             const p = uint8[i+5].toString(16).padStart(2,'0').toUpperCase();
             const c = uint8[i+6].toString(16).padStart(2,'0').toUpperCase();
             const l = uint8[i+7].toString(16).padStart(2,'0').toUpperCase();
             const codec = 'avc1.' + p + c + l;
-            console.log('[Engine] Detected codec:', codec);
+            console.log('[Engine] Video codec:', codec);
             return codec;
         }
-        if (uint8[i] === 0x68 && uint8[i+1] === 0x76 && uint8[i+2] === 0x63 && uint8[i+3] === 0x43) {
-            console.log('[Engine] Detected codec: HEVC');
+        if (uint8[i]===0x68 && uint8[i+1]===0x76 && uint8[i+2]===0x63 && uint8[i+3]===0x43) {
+            console.log('[Engine] Video codec: HEVC');
             return 'hev1.1.6.L93.B0';
         }
     }
-    console.warn('[Engine] Codec not detected, using safe fallback');
+    console.warn('[Engine] Video codec not detected, using fallback');
     return 'avc1.42E01E';
 };
 
+// Detect audio codec from esds box → e.g. "mp4a.40.2"
+// Chrome requires audio codec in MIME type — omitting it causes:
+// "audio object type 0x40 does not match what is specified in the mimetype"
+const detectAudioCodec = (uint8) => {
+    for (let i = 0; i < uint8.length - 14; i++) {
+        if (uint8[i]===0x65 && uint8[i+1]===0x73 && uint8[i+2]===0x64 && uint8[i+3]===0x73) {
+            const objType = (uint8[i+13] >> 3) & 0x1f;
+            const codec = 'mp4a.40.' + objType;
+            console.log('[Engine] Audio codec:', codec);
+            return codec;
+        }
+    }
+    console.warn('[Engine] Audio codec not detected, using mp4a.40.2 fallback');
+    return 'mp4a.40.2';
+};
+
+// Split fragmented MP4: brain = ftyp+moov, brick = moof+mdat...
 const splitFragmentedMp4 = (uint8) => {
     let offset = 0, splitIndex = -1, foundMoov = false;
     const log = [];
@@ -106,6 +126,7 @@ const splitFragmentedMp4 = (uint8) => {
     return { brainBytes: uint8.slice(0, splitIndex), brickBytes: uint8.slice(splitIndex) };
 };
 
+// AES-CTR encrypt (length:128 = full counter, symmetric across all browsers)
 const aesEncrypt = async (plain, keyBytes, ivBytes) => {
     const ck = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['encrypt']);
     return new Uint8Array(await crypto.subtle.encrypt(
@@ -121,7 +142,7 @@ export const processEvzonesVideo = async (file) => {
     console.log('[Engine] Writing input...');
     await ffmpeg.writeFile('input.mp4', await fetchFile(file));
 
-    // Pass 1: defragment + strip problem tracks/metadata
+    // Pass 1: defragment + strip extra tracks (tmcd etc) and corrupt metadata
     console.log('[Engine] Pass 1: defragmenting...');
     await ffmpeg.exec([
         '-i', 'input.mp4',
@@ -135,7 +156,7 @@ export const processEvzonesVideo = async (file) => {
         'defrag.mp4'
     ]);
 
-    // Pass 2: fragment cleanly — 2 tracks, 2 trex, no tmcd, no udta
+    // Pass 2: fragment cleanly for MSE — 2 tracks, 2 trex, no udta
     console.log('[Engine] Pass 2: fragmenting...');
     await ffmpeg.exec([
         '-i', 'defrag.mp4',
@@ -156,8 +177,9 @@ export const processEvzonesVideo = async (file) => {
     console.log('[Engine] FFmpeg output:', uint8.length, 'bytes');
 
     const { brainBytes: rawBrain, brickBytes } = splitFragmentedMp4(uint8);
-    const brainBytes = removeUdtaFromBrain(patchFtypBrand(rawBrain));
-    const codec = detectCodec(brainBytes);
+    const brainBytes  = removeUdtaFromBrain(patchFtypBrand(rawBrain));
+    const codec       = detectCodec(brainBytes);
+    const audioCodec  = detectAudioCodec(brainBytes);
 
     const keyBytes = crypto.getRandomValues(new Uint8Array(16));
     const kidBytes = crypto.getRandomValues(new Uint8Array(16));
@@ -168,17 +190,18 @@ export const processEvzonesVideo = async (file) => {
     const encryptedBrick = await aesEncrypt(brickBytes, keyBytes, kidBytes);
     const brainBase64    = uint8ToBase64(brainBytes);
 
-    console.log('[Engine] Brain:', brainBytes.length, 'bytes | Brick:', encryptedBrick.length, 'bytes | Codec:', codec);
+    console.log('[Engine] Brain:', brainBytes.length, 'bytes | Brick:', encryptedBrick.length, 'bytes | Codec:', codec, '| Audio:', audioCodec);
 
-    return { brain: brainBase64, brick: encryptedBrick, key, kid, fileName: file.name, codec };
+    return { brain: brainBase64, brick: encryptedBrick, key, kid, fileName: file.name, codec, audioCodec };
 };
 
 export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
-    const VAULT_URL  = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
-    const codec      = asset.codec  || 'avc1.42E01E';
+    const VAULT_URL   = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
+    const codec       = asset.codec      || 'avc1.42E01E';
+    const audioCodec  = asset.audioCodec || 'mp4a.40.2';
     const brickBase64 = uint8ToBase64(asset.brick);
 
-    console.log('[Engine] Smart Asset:', receivedId, '| Codec:', codec, '| Brick B64:', brickBase64.length);
+    console.log('[Engine] Smart Asset:', receivedId, '| Codec:', codec, '| Audio:', audioCodec, '| Brick B64:', brickBase64.length);
 
     const htmlTemplate = `<!DOCTYPE html>
 <html lang="en">
@@ -239,7 +262,8 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         var ASSET_ID  = '${receivedId}';
         var VAULT_URL = '${VAULT_URL}';
         var CODEC     = '${codec}';
-        var MIME_TYPE = 'video/mp4; codecs="' + CODEC + '"';
+        var AUDIO     = '${audioCodec}';
+        var MIME_TYPE = 'video/mp4; codecs="' + CODEC + ', ' + AUDIO + '"';
 
         function hexToBytes(hex) {
             var b = new Uint8Array(hex.length / 2);
@@ -344,11 +368,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 var brickBytes = await decryptAesCtr(encBrick, keyBytes, kidBytes);
                 console.log('Brain:', brainBytes.length, 'bytes | Brick:', brickBytes.length, 'bytes');
 
-                // Diagnostic: inspect first 64 bytes of decrypted brick
-                var brickHex = Array.from(brickBytes.slice(0, 64)).map(function(b){ return b.toString(16).padStart(2,'0'); }).join(' ');
-                console.log('Brick header (hex):', brickHex);
-                console.log('Brick first box type:', String.fromCharCode(brickBytes[4], brickBytes[5], brickBytes[6], brickBytes[7]));
-
                 step(5, 'Validating codec: ' + MIME_TYPE);
                 if (!MediaSource.isTypeSupported(MIME_TYPE)) throw new Error('Codec not supported: ' + MIME_TYPE);
                 console.log('Codec accepted:', MIME_TYPE);
@@ -365,16 +384,12 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 step(7, 'Appending init segment + first fragment...');
                 await new Promise(function(r) { setTimeout(r, 0); });
-
-                // Chrome requires the init segment and first moof to be appended together
-                // in a single appendBuffer call — it validates tfhd flags against trex
-                // only when it has both in the same buffer.
                 var CHUNK = 512 * 1024;
-                var firstChunk = brickBytes.slice(0, Math.min(CHUNK, brickBytes.length));
-                var combined = new Uint8Array(brainBytes.length + firstChunk.length);
-                combined.set(brainBytes, 0);
-                combined.set(firstChunk, brainBytes.length);
-                await appendBuffer(sb, combined);
+                var firstChunk    = brickBytes.slice(0, Math.min(CHUNK, brickBytes.length));
+                var initPlusFirst = new Uint8Array(brainBytes.length + firstChunk.length);
+                initPlusFirst.set(brainBytes, 0);
+                initPlusFirst.set(firstChunk, brainBytes.length);
+                await appendBuffer(sb, initPlusFirst);
                 console.log('Brain + first fragment appended OK');
 
                 step(8, 'Streaming remaining media...');
@@ -383,6 +398,7 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                     await appendBuffer(sb, brickBytes.slice(i, i + CHUNK));
                 }
                 if (ms.readyState === 'open') ms.endOfStream();
+                console.log('All data appended');
 
                 step(9, 'Authorized. Starting playback...');
                 setTimeout(function() {
