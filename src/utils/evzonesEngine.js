@@ -363,15 +363,22 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 var sb = ms.addSourceBuffer(MIME_TYPE);
                 console.log('SourceBuffer created, mode:', sb.mode);
 
-                step(7, 'Appending init segment...');
+                step(7, 'Appending init segment + first fragment...');
                 await new Promise(function(r) { setTimeout(r, 0); });
-                await appendBuffer(sb, brainBytes);
-                console.log('Brain appended OK');
 
-                step(8, 'Streaming media...');
-                // TEMP: brick loop commented out — testing brain-only append
+                // Chrome requires the init segment and first moof to be appended together
+                // in a single appendBuffer call — it validates tfhd flags against trex
+                // only when it has both in the same buffer.
                 var CHUNK = 512 * 1024;
-                for (var i = 0; i < brickBytes.length; i += CHUNK) {
+                var firstChunk = brickBytes.slice(0, Math.min(CHUNK, brickBytes.length));
+                var combined = new Uint8Array(brainBytes.length + firstChunk.length);
+                combined.set(brainBytes, 0);
+                combined.set(firstChunk, brainBytes.length);
+                await appendBuffer(sb, combined);
+                console.log('Brain + first fragment appended OK');
+
+                step(8, 'Streaming remaining media...');
+                for (var i = CHUNK; i < brickBytes.length; i += CHUNK) {
                     if (ms.readyState !== 'open') break;
                     await appendBuffer(sb, brickBytes.slice(i, i + CHUNK));
                 }
