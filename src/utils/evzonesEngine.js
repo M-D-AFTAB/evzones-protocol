@@ -392,24 +392,61 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 // Register service worker and hand it the decoded buffers via postMessage
                 // (transferable — zero copy, no RAM duplication)
+                // AFTER — replace with this:
                 if (!('serviceWorker' in navigator)) {
-                    // Absolute fallback for very old Safari — blob URL
+                    // Very old Safari fallback — load full blob into RAM
                     var full = new Uint8Array(brainBytes.length + brickBytes.length);
-                    full.set(brainBytes, 0); full.set(brickBytes, brainBytes.length);
+                    full.set(brainBytes, 0);
+                    full.set(brickBytes, brainBytes.length);
                     player.src = URL.createObjectURL(new Blob([full], { type: 'video/mp4' }));
                 } else {
-                    var reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+                    // Inline SW as blob — works on any domain, no external sw.js needed
+                    var swCode = [
+                        'const cache = new Map();',
+                        'self.addEventListener("message", function(e) {',
+                        '    if (e.data.type === "REGISTER_VIDEO") {',
+                        '        cache.set(e.data.id, { brain: new Uint8Array(e.data.brain), brick: new Uint8Array(e.data.brick), total: e.data.brain.byteLength + e.data.brick.byteLength });',
+                        '    }',
+                        '});',
+                        'self.addEventListener("fetch", function(e) {',
+                        '    var url = new URL(e.request.url);',
+                        '    if (!url.pathname.startsWith("/sw-video/")) return;',
+                        '    var id = url.pathname.split("/sw-video/")[1];',
+                        '    var vid = cache.get(id);',
+                        '    if (!vid) return e.respondWith(new Response("Not found", { status: 404 }));',
+                        '    var total = vid.total; var rangeHdr = e.request.headers.get("range");',
+                        '    var start = 0; var end = total - 1;',
+                        '    if (rangeHdr) { var m = rangeHdr.match(/bytes=(\\\\d+)-(\\\\d*)/); start = parseInt(m[1]); end = m[2] ? parseInt(m[2]) : total - 1; }',
+                        '    var length = end - start + 1; var brainLen = vid.brain.byteLength; var brain = vid.brain; var brick = vid.brick;',
+                        '    var stream = new ReadableStream({ start: function(controller) {',
+                        '        var CHUNK = 262144; var pos = start;',
+                        '        function push() {',
+                        '            if (pos > end) { controller.close(); return; }',
+                        '            var chunkEnd = Math.min(pos + CHUNK - 1, end); var size = chunkEnd - pos + 1;',
+                        '            var out = new Uint8Array(size);',
+                        '            for (var i = 0; i < size; i++) { var abs = pos + i; out[i] = abs < brainLen ? brain[abs] : brick[abs - brainLen]; }',
+                        '            controller.enqueue(out); pos = chunkEnd + 1; setTimeout(push, 0);',
+                        '        } push();',
+                        '    }});',
+                        '    var headers = { "Content-Type": "video/mp4", "Content-Length": String(length), "Accept-Ranges": "bytes" };',
+                        '    if (rangeHdr) headers["Content-Range"] = "bytes " + start + "-" + end + "/" + total;',
+                        '    e.respondWith(new Response(stream, { status: rangeHdr ? 206 : 200, headers: headers }));',
+                        '});'
+                    ].join('\\n');
+
+                    var swBlob = new Blob([swCode], { type: 'application/javascript' });
+                    var swUrl  = URL.createObjectURL(swBlob);
+                    var reg    = await navigator.serviceWorker.register(swUrl, { scope: '/' })
+                        .catch(function(err) { throw new Error('SW registration failed: ' + err.message); });
                     await navigator.serviceWorker.ready;
-                    var id  = ASSET_ID;
-                    var sw  = reg.active || reg.installing || reg.waiting;
-                    // Transfer buffers — ownership moves to SW, no RAM copy
+                    var swId = ASSET_ID;
+                    var sw   = reg.active || reg.installing || reg.waiting;
                     sw.postMessage(
-                        { type: 'REGISTER_VIDEO', id, brain: brainBytes.buffer, brick: brickBytes.buffer },
+                        { type: 'REGISTER_VIDEO', id: swId, brain: brainBytes.buffer, brick: brickBytes.buffer },
                         [brainBytes.buffer, brickBytes.buffer]
                     );
-                    // Small delay to let SW register the video before fetch fires
-                    await new Promise(r => setTimeout(r, 100));
-                    player.src = '/sw-video/' + id;
+                    await new Promise(function(r) { setTimeout(r, 150); });
+                    player.src = '/sw-video/' + swId;
                 }
 
                 document.getElementById('status').style.display = 'none';
