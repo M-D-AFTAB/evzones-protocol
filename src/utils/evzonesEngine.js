@@ -328,6 +328,12 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
             return new TextDecoder().decode(plain);
         }
 
+        // Diagnostic: log first 64 bytes of brick to inspect moof header
+        var brickHex = Array.from(brickBytes.slice(0, 64))
+            .map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' ');
+        console.log('Brick header (hex):', brickHex);
+        console.log('Brick first box type:', String.fromCharCode(brickBytes[4], brickBytes[5], brickBytes[6], brickBytes[7]));
+
         function appendBuffer(sb, chunk) {
             return new Promise(function(resolve, reject) {
                 function onDone() {
@@ -455,13 +461,22 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 // Step 8: Stream brick in 512 KB chunks (moof + mdat pairs)
                 step(8, 'Streaming media...');
+
+                // Diagnostic: log first 64 bytes of brick to inspect moof header
+                var brickHex = Array.from(brickBytes.slice(0, 64))
+                    .map(function(b) { return b.toString(16).padStart(2,'0'); }).join(' ');
+                console.log('Brick header (hex):', brickHex);
+                console.log('Brick first box type:', String.fromCharCode(brickBytes[4], brickBytes[5], brickBytes[6], brickBytes[7]));
+
+                // TEMP: comment out brick loop to test if brain alone appends cleanly
+                /*
                 var CHUNK = 512 * 1024;
                 for (var i = 0; i < brickBytes.length; i += CHUNK) {
                     if (ms.readyState !== 'open') break;
                     await appendBuffer(sb, brickBytes.slice(i, i + CHUNK));
                 }
+                */
                 if (ms.readyState === 'open') ms.endOfStream();
-                console.log('All data appended');
 
                 step(9, 'Authorized. Starting playback...');
                 setTimeout(function() {
