@@ -166,6 +166,9 @@ const aesEncrypt = async (plain, keyBytes, ivBytes) => {
 export const processEvzonesVideo = async (file) => {
     if (!ffmpeg.loaded) await ffmpeg.load();
 
+    ffmpeg.on('log', ({ message }) => console.log('[FFmpeg]', message));
+    ffmpeg.on('progress', ({ progress }) => console.log('[FFmpeg] progress:', Math.round(progress * 100) + '%'));
+
     console.log('[Engine] Writing input...');
     await ffmpeg.writeFile('input.mp4', await fetchFile(file));
 
