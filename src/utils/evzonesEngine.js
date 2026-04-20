@@ -370,13 +370,11 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 step(8, 'Streaming media...');
                 // TEMP: brick loop commented out — testing brain-only append
-                /*
                 var CHUNK = 512 * 1024;
                 for (var i = 0; i < brickBytes.length; i += CHUNK) {
                     if (ms.readyState !== 'open') break;
                     await appendBuffer(sb, brickBytes.slice(i, i + CHUNK));
                 }
-                */
                 if (ms.readyState === 'open') ms.endOfStream();
 
                 step(9, 'Authorized. Starting playback...');
