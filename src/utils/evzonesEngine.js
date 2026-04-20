@@ -362,6 +362,64 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
             function step(n, t) { console.log(n, t); debugEl.textContent = 'Step ' + n + ': ' + t; }
 
             try {
+
+            // start
+                        if (typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported) {
+                step(1, 'iOS detected — registering stream worker...');
+                msgEl.innerHTML = "Verifying Domain Authority... <span class='spinner'></span>";
+
+                // Vault handshake (same as before)
+                var rsaKeyPair = await crypto.subtle.generateKey(
+                    { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
+                    false, ['decrypt']
+                );
+                var pubKeyDer = await crypto.subtle.exportKey('spki', rsaKeyPair.publicKey);
+                var pubKeyB64 = bytesToBase64(new Uint8Array(pubKeyDer));
+                var res = await fetch(VAULT_URL + '/api/unlock?assetID=' + ASSET_ID, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ publicKey: pubKeyB64 })
+                });
+                if (!res.ok) throw new Error('Vault denied: ' + res.status);
+                var payload  = await res.json();
+                var authJson = await hybridDecrypt(rsaKeyPair.privateKey, payload);
+                var auth     = JSON.parse(authJson);
+
+                var keyBytes   = hexToBytes(auth.key);
+                var kidBytes   = hexToBytes(auth.kid);
+                var brainBytes = base64ToBytes(auth.brain);
+                var encBrick   = base64ToBytes(BRICK_B64);
+                var brickBytes = await decryptAesCtr(encBrick, keyBytes, kidBytes);
+
+                // Register service worker and hand it the decoded buffers via postMessage
+                // (transferable — zero copy, no RAM duplication)
+                if (!('serviceWorker' in navigator)) {
+                    // Absolute fallback for very old Safari — blob URL
+                    var full = new Uint8Array(brainBytes.length + brickBytes.length);
+                    full.set(brainBytes, 0); full.set(brickBytes, brainBytes.length);
+                    player.src = URL.createObjectURL(new Blob([full], { type: 'video/mp4' }));
+                } else {
+                    var reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+                    await navigator.serviceWorker.ready;
+                    var id  = ASSET_ID;
+                    var sw  = reg.active || reg.installing || reg.waiting;
+                    // Transfer buffers — ownership moves to SW, no RAM copy
+                    sw.postMessage(
+                        { type: 'REGISTER_VIDEO', id, brain: brainBytes.buffer, brick: brickBytes.buffer },
+                        [brainBytes.buffer, brickBytes.buffer]
+                    );
+                    // Small delay to let SW register the video before fetch fires
+                    await new Promise(r => setTimeout(r, 100));
+                    player.src = '/sw-video/' + id;
+                }
+
+                document.getElementById('status').style.display = 'none';
+                player.style.display = 'block';
+                player.play().catch(function() { debugEl.textContent = 'Tap video to play'; });
+                return;
+            }
+
+            //end
+
                 step(1, 'Generating session keypair...');
                 var rsaKeyPair = await crypto.subtle.generateKey(
                     { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
@@ -387,13 +445,13 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 if (!auth.brain || !auth.key || !auth.kid) throw new Error('Incomplete auth data after decryption');
                 console.log('Auth decrypted — brain:', auth.brain.length, 'chars');
 
-                step(4, 'Decrypting media with AES-CTR...');
+                step(4, 'Preparing media stream...');
                 var keyBytes   = hexToBytes(auth.key);
                 var kidBytes   = hexToBytes(auth.kid);
                 var brainBytes = base64ToBytes(auth.brain);
                 var encBrick   = base64ToBytes(BRICK_B64);
-                var brickBytes = await decryptAesCtr(encBrick, keyBytes, kidBytes);
-                console.log('Brain:', brainBytes.length, 'bytes | Brick:', brickBytes.length, 'bytes');
+                // Don't decrypt everything — we'll decrypt per-chunk below
+                console.log('Brain:', brainBytes.length, 'bytes | Enc brick:', encBrick.length, 'bytes');
 
                 step(5, 'Validating codec: ' + MIME_TYPE);
                 if (!MediaSource.isTypeSupported(MIME_TYPE)) throw new Error('Codec not supported: ' + MIME_TYPE);
@@ -411,8 +469,12 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
                 step(7, 'Appending init segment + first fragment...');
                 await new Promise(function(r) { setTimeout(r, 0); });
-                var CHUNK = 512 * 1024;
-                var firstChunk    = brickBytes.slice(0, Math.min(CHUNK, brickBytes.length));
+
+                var CHUNK = /Mobi|Android/i.test(navigator.userAgent) ? 512 * 1024 : 2 * 1024 * 1024;
+
+                // Decrypt and append first chunk together with brain
+                var firstEncChunk = encBrick.slice(0, Math.min(CHUNK, encBrick.length));
+                var firstChunk    = await decryptAesCtr(firstEncChunk, keyBytes, kidBytes);
                 var initPlusFirst = new Uint8Array(brainBytes.length + firstChunk.length);
                 initPlusFirst.set(brainBytes, 0);
                 initPlusFirst.set(firstChunk, brainBytes.length);
@@ -420,9 +482,33 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 console.log('Brain + first fragment appended OK');
 
                 step(8, 'Streaming remaining media...');
-                for (var i = CHUNK; i < brickBytes.length; i += CHUNK) {
+                // Target buffer: keep 3 chunks ahead, pause if too much buffered
+                var TARGET_BUFFER = 30; // seconds ahead to buffer
+                for (var i = CHUNK; i < encBrick.length; i += CHUNK) {
                     if (ms.readyState !== 'open') break;
-                    await appendBuffer(sb, brickBytes.slice(i, i + CHUNK));
+
+                    // Throttle: if we have enough buffered, wait for it to drain
+                    if (player.buffered.length > 0) {
+                        var bufferedAhead = player.buffered.end(player.buffered.length - 1) - player.currentTime;
+                        if (bufferedAhead > TARGET_BUFFER) {
+                            await new Promise(function(r) {
+                                player.addEventListener('timeupdate', function check() {
+                                    var ahead = player.buffered.length > 0
+                                        ? player.buffered.end(player.buffered.length - 1) - player.currentTime
+                                        : 0;
+                                    if (ahead < TARGET_BUFFER / 2) {
+                                        player.removeEventListener('timeupdate', check);
+                                        r();
+                                    }
+                                });
+                            });
+                        }
+                    }
+
+                    // Decrypt only this chunk — previous chunk is already GC-able
+                    var encChunk = encBrick.slice(i, Math.min(i + CHUNK, encBrick.length));
+                    var chunk    = await decryptAesCtr(encChunk, keyBytes, kidBytes);
+                    await appendBuffer(sb, chunk);
                 }
                 if (ms.readyState === 'open') ms.endOfStream();
                 console.log('All data appended');
