@@ -93,11 +93,38 @@ const detectCodec = (uint8) => {
 // Chrome requires audio codec in MIME type — omitting it causes:
 // "audio object type 0x40 does not match what is specified in the mimetype"
 const detectAudioCodec = (uint8) => {
-    for (let i = 0; i < uint8.length - 14; i++) {
+    for (let i = 0; i < uint8.length - 20; i++) {
+        // Find 'esds' box
         if (uint8[i]===0x65 && uint8[i+1]===0x73 && uint8[i+2]===0x64 && uint8[i+3]===0x73) {
-            const objType = (uint8[i+13] >> 3) & 0x1f;
-            const codec = 'mp4a.40.' + objType;
-            console.log('[Engine] Audio codec:', codec);
+            // esds: [size4][type4][version1][flags3][ES_Descriptor...]
+            // ES_Descriptor tag=0x03, then skip variable-length size + 3 bytes ES_ID+flags
+            // DecoderConfigDescriptor tag=0x04, skip size + 13 bytes
+            // DecoderSpecificInfo tag=0x05, skip size
+            // AudioSpecificConfig: first 5 bits = audioObjectType
+            let o = i + 8; // skip version+flags (4 bytes) — wait, esds box: offset 0=size,4=type,8=ver+flags
+            o = i + 12;    // start of ES_Descriptor (after box header + version/flags)
+            // Skip ES_Descriptor tag+size
+            if (uint8[o] !== 0x03) continue;
+            o++; // skip tag 0x03
+            // Skip variable-length size (1-4 bytes, high bit set = more bytes)
+            while (uint8[o] & 0x80) o++;
+            o++; // last size byte
+            o += 3; // skip ES_ID (2) + stream priority (1)
+            // Now at DecoderConfigDescriptor
+            if (uint8[o] !== 0x04) continue;
+            o++; // skip tag 0x04
+            while (uint8[o] & 0x80) o++;
+            o++; // last size byte
+            o += 13; // skip DecoderConfigDescriptor fields
+            // Now at DecoderSpecificInfo
+            if (uint8[o] !== 0x05) continue;
+            o++; // skip tag 0x05
+            while (uint8[o] & 0x80) o++;
+            o++; // last size byte
+            // AudioSpecificConfig: top 5 bits = audioObjectType
+            const objType = (uint8[o] >> 3) & 0x1f;
+            const codec = 'mp4a.40.' + (objType === 0 ? 2 : objType);
+            console.log('[Engine] Audio codec:', codec, '(objType=' + objType + ')');
             return codec;
         }
     }
