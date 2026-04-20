@@ -231,46 +231,6 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
     const audioCodec  = asset.audioCodec || 'mp4a.40.2';
     const brickBase64 = uint8ToBase64(asset.brick);
 
-    // SW code defined here in normal JS — no escaping hell inside template literal
-    const swCodeLines = [
-        'const cache = new Map();',
-        'self.addEventListener("message", function(e) {',
-        '    if (e.data.type === "REGISTER_VIDEO") {',
-        '        cache.set(e.data.id, { brain: new Uint8Array(e.data.brain), brick: new Uint8Array(e.data.brick), total: e.data.brain.byteLength + e.data.brick.byteLength });',
-        '    }',
-        '});',
-        'self.addEventListener("fetch", function(e) {',
-        '    var url = new URL(e.request.url);',
-        '    if (!url.pathname.startsWith("/sw-video/")) return;',
-        '    var id = url.pathname.split("/sw-video/")[1];',
-        '    var vid = cache.get(id);',
-        '    if (!vid) return e.respondWith(new Response("Not found", { status: 404 }));',
-        '    var total = vid.total; var rangeHdr = e.request.headers.get("range");',
-        '    var start = 0; var end = total - 1;',
-        '    if (rangeHdr) { var m = rangeHdr.match(/bytes=(\\d+)-(\\d*)/); start = parseInt(m[1]); end = m[2] ? parseInt(m[2]) : total - 1; }',
-        '    var length = end - start + 1; var brainLen = vid.brain.byteLength; var brain = vid.brain; var brick = vid.brick;',
-        '    var stream = new ReadableStream({ start: function(controller) {',
-        '        var CHUNK = 262144; var pos = start;',
-        '        function push() {',
-        '            if (pos > end) { controller.close(); return; }',
-        '            var chunkEnd = Math.min(pos + CHUNK - 1, end); var size = chunkEnd - pos + 1;',
-        '            var out = new Uint8Array(size);',
-        '            for (var i = 0; i < size; i++) { var abs = pos + i; out[i] = abs < brainLen ? brain[abs] : brick[abs - brainLen]; }',
-        '            controller.enqueue(out); pos = chunkEnd + 1; setTimeout(push, 0);',
-        '        } push();',
-        '    }});',
-        '    var headers = { "Content-Type": "video/mp4", "Content-Length": String(length), "Accept-Ranges": "bytes" };',
-        '    if (rangeHdr) headers["Content-Range"] = "bytes " + start + "-" + end + "/" + total;',
-        '    e.respondWith(new Response(stream, { status: rangeHdr ? 206 : 200, headers: headers }));',
-        '});'
-    ].join('\n');
-
-    // Escape for safe injection into the HTML template as a JS string literal
-    const swCodeEscaped = swCodeLines
-        .replace(/\\/g, '\\\\')
-        .replace(/`/g, '\\`')
-        .replace(/\$/g, '\\$');
-
     console.log('[Engine] Smart Asset:', receivedId, '| Codec:', codec, '| Audio:', audioCodec, '| Brick B64:', brickBase64.length);
 
     const htmlTemplate = `<!DOCTYPE html>
@@ -406,12 +366,12 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
 
             try {
 
-            // start
+                        // start
+                        
                         if (typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported) {
-                step(1, 'iOS detected — registering stream worker...');
+                step(1, 'iOS detected — preparing stream...');
                 msgEl.innerHTML = "Verifying Domain Authority... <span class='spinner'></span>";
 
-                // Vault handshake (same as before)
                 var rsaKeyPair = await crypto.subtle.generateKey(
                     { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
                     false, ['decrypt']
@@ -433,35 +393,39 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                 var encBrick   = base64ToBytes(BRICK_B64);
                 var brickBytes = await decryptAesCtr(encBrick, keyBytes, kidBytes);
 
-                // Register service worker and hand it the decoded buffers via postMessage
-                // (transferable — zero copy, no RAM duplication)
-                // AFTER — replace with this:
-                if (!('serviceWorker' in navigator)) {
-                    // Very old Safari fallback — load full blob into RAM
-                    var full = new Uint8Array(brainBytes.length + brickBytes.length);
-                    full.set(brainBytes, 0);
-                    full.set(brickBytes, brainBytes.length);
-                    player.src = URL.createObjectURL(new Blob([full], { type: 'video/mp4' }));
-                } else {
-                    // Inline SW as blob — works on any domain, no external sw.js needed
-                    var swCode = \`${swCodeEscaped}\`;
-                    var swBlob = new Blob([swCode], { type: 'application/javascript' });
-                    var swUrl  = URL.createObjectURL(swBlob);
-                    var reg    = await navigator.serviceWorker.register(swUrl, { scope: '/' })
-                        .catch(function(err) { throw new Error('SW registration failed: ' + err.message); });
-                    await navigator.serviceWorker.ready;
-                    var swId = ASSET_ID;
-                    var sw   = reg.active || reg.installing || reg.waiting;
-                    sw.postMessage(
-                        { type: 'REGISTER_VIDEO', id: swId, brain: brainBytes.buffer, brick: brickBytes.buffer },
-                        [brainBytes.buffer, brickBytes.buffer]
-                    );
-                    await new Promise(function(r) { setTimeout(r, 150); });
-                    player.src = '/sw-video/' + swId;
-                }
+                // Stitch brain + brick into a ReadableStream — Safari plays this
+                // without loading the whole file into RAM at once
+                var brain = brainBytes;
+                var brick = brickBytes;
+                var IOS_CHUNK = 256 * 1024;
+                var totalBytes = brain.length + brick.length;
+
+                var stream = new ReadableStream({
+                    start: function(controller) {
+                        var pos = 0;
+                        function push() {
+                            if (pos >= totalBytes) { controller.close(); return; }
+                            var end  = Math.min(pos + IOS_CHUNK, totalBytes);
+                            var size = end - pos;
+                            var out  = new Uint8Array(size);
+                            for (var i = 0; i < size; i++) {
+                                var abs = pos + i;
+                                out[i] = abs < brain.length ? brain[abs] : brick[abs - brain.length];
+                            }
+                            controller.enqueue(out);
+                            pos = end;
+                            setTimeout(push, 0);
+                        }
+                        push();
+                    }
+                });
+
+                var response = new Response(stream, { headers: { 'Content-Type': 'video/mp4' } });
+                var blobUrl  = URL.createObjectURL(await response.blob());
 
                 document.getElementById('status').style.display = 'none';
                 player.style.display = 'block';
+                player.src = blobUrl;
                 player.play().catch(function() { debugEl.textContent = 'Tap video to play'; });
                 return;
             }
@@ -566,6 +530,9 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
                     var chunk = await decryptAesCtr(encChunk, keyBytes, counter);
                     await appendBuffer(sb, chunk);
                 }
+
+                if (ms.readyState === 'open') ms.endOfStream();
+                console.log('All data appended');
 
                 step(9, 'Authorized. Starting playback...');
                 setTimeout(function() {
