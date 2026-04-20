@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   worker: {
-    format: 'es', // Force ES module format for workers
+    format: 'es',
   },
   server: {
     headers: {
@@ -13,6 +13,8 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'] // Prevent Vite from pre-bundling these
-  }
+    exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util']
+  },
+  // Ensure sw.js is copied to dist root
+  publicDir: 'public',
 })
