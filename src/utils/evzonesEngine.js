@@ -242,10 +242,28 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         var MIME_TYPE    = 'video/mp4; codecs="${codec}, ${audioCodec}"';
         var SEGMENT_SIZE = ${SEG_SIZE};
         var BATCH_SIZE   = 20;
+        function agentLog(hypothesisId,message,data){
+            // #region agent log
+            fetch('http://127.0.0.1:7791/ingest/7b095153-cf81-4920-9309-1ee34f6a5f68',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'70f25a'},body:JSON.stringify({sessionId:'70f25a',runId:'pre-fix',hypothesisId:hypothesisId,location:'src/utils/evzonesEngine.js:template',message:message,data:data,timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+        }
 
         function hexToBytes(h){var b=new Uint8Array(h.length/2);for(var i=0;i<h.length;i+=2)b[i/2]=parseInt(h.substr(i,2),16);return b}
         function base64ToBytes(b){var s=atob(b.replace(/\s/g,''));var o=new Uint8Array(s.length);for(var i=0;i<s.length;i++)o[i]=s.charCodeAt(i);return o}
         function bytesToBase64(b){var s='';for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s)}
+        function buildApiUrl(path, params){
+            var base=String(VAULT_URL||'');
+            var hasDoubleSlashInBase=/https?:\/\/.+\/$/.test(base);
+            var url=base+'/'+String(path||'');
+            if(params&&typeof params==='object'){
+                var q=new URLSearchParams(params).toString();
+                if(q)url+=(url.indexOf('?')===-1?'?':'&')+q;
+            }
+            // #region agent log
+            agentLog('H1','Constructed API URL',{base:base,path:path,url:url,hasTrailingSlash:/\/$/.test(base),hasDoubleSlashInPath:url.indexOf('//api/')>-1,hasDoubleSlashInBase:hasDoubleSlashInBase});
+            // #endregion
+            return url;
+        }
 
         async function decryptSeg(enc, keyHex) {
             var k=hexToBytes(keyHex), iv=new Uint8Array(16);
@@ -276,10 +294,17 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         var keyCache={}, rsaPriv=null, pubB64=null;
 
         async function fetchKeys(start) {
-            var r=await fetch(VAULT_URL+'/api/unlock?assetID='+ASSET_ID,{
+            var unlockUrl=buildApiUrl('api/unlock',{assetID:ASSET_ID});
+            // #region agent log
+            agentLog('H2','fetchKeys request start',{start:start,assetId:ASSET_ID,unlockUrl:unlockUrl,origin:window.location.origin});
+            // #endregion
+            var r=await fetch(unlockUrl,{
                 method:'POST',headers:{'Content-Type':'application/json'},
                 body:JSON.stringify({publicKey:pubB64,segmentStart:start,segmentCount:BATCH_SIZE})
             });
+            // #region agent log
+            agentLog('H3','fetchKeys response',{status:r.status,ok:r.ok,redirected:r.redirected,type:r.type,url:r.url});
+            // #endregion
             if(!r.ok){var j=await r.json().catch(function(){return{}});throw new Error(j.error||'Vault denied: '+r.status)}
             var d=JSON.parse(await hybridDecrypt(rsaPriv,await r.json()));
             d.segmentKeys.forEach(function(k){keyCache[k.index]=k.key});
@@ -312,7 +337,11 @@ export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
         function startKillPoll(player){
             setInterval(async function(){
                 try{
-                    var r=await fetch(VAULT_URL+'/api/unlock?assetID='+ASSET_ID,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({publicKey:pubB64,segmentStart:-1,segmentCount:0})});
+                    var killUrl=buildApiUrl('api/unlock',{assetID:ASSET_ID});
+                    // #region agent log
+                    agentLog('H4','kill poll request',{url:killUrl,sessionId:SESSION_ID||null});
+                    // #endregion
+                    var r=await fetch(killUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({publicKey:pubB64,segmentStart:-1,segmentCount:0})});
                     if(r.status===403){
                         player.pause(); player.src='';
                         document.getElementById('status').style.display='flex';

@@ -53,11 +53,41 @@ async function hybridEncrypt(plaintext, clientPublicKeyB64) {
 
 export default async function handler(req, res) {
     const origin = req.headers.origin || req.headers.referer || '';
+    const sendAgentLog = (hypothesisId, message, data) => {
+        // #region agent log
+        fetch('http://127.0.0.1:7791/ingest/7b095153-cf81-4920-9309-1ee34f6a5f68', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '70f25a' },
+            body: JSON.stringify({
+                sessionId: '70f25a',
+                runId: 'pre-fix',
+                hypothesisId,
+                location: 'api/unlock.js:handler',
+                message,
+                data,
+                timestamp: Date.now()
+            })
+        }).catch(() => {});
+        // #endregion
+    };
+    // #region agent log
+    sendAgentLog('H5', 'unlock handler entry', {
+        method: req.method,
+        origin,
+        url: req.url,
+        hasDoubleSlashInUrl: typeof req.url === 'string' ? req.url.includes('//api/') : false
+    });
+    // #endregion
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    if (req.method === 'OPTIONS') return res.status(204).end();
+    if (req.method === 'OPTIONS') {
+        // #region agent log
+        sendAgentLog('H3', 'preflight handled', { status: 204, allowMethods: 'POST, OPTIONS' });
+        // #endregion
+        return res.status(204).end();
+    }
     if (req.method !== 'POST')   return res.status(405).json({ error: 'Method Not Allowed' });
 
     const { assetID } = req.query;
