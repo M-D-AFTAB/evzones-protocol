@@ -6,49 +6,6 @@ import crypto from 'crypto';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const resend   = new Resend(process.env.RESEND_API_KEY);
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function normalizeToHostname(raw) {
-    if (!raw) return '';
-    raw = raw.trim().toLowerCase();
-    try {
-        const u = new URL(raw.endsWith('/') ? raw.slice(0, -1) : raw);
-        return u.hostname;
-    } catch {
-        return raw
-            .replace(/^https?:\/\//, '')
-            .split('/')[0]
-            .split('?')[0]
-            .split('#')[0];
-    }
-}
-
-function deriveSegmentKey(assetSecret, assetID, segmentIndex) {
-    const masterKey = Buffer.from(process.env.SEGMENT_MASTER_KEY, 'hex');
-    const assetKey  = crypto.createHmac('sha256', masterKey).update(assetSecret).digest();
-    return crypto.createHmac('sha256', assetKey).update(`${assetID}:${segmentIndex}`).digest();
-}
-
-async function hybridEncrypt(plaintext, clientPublicKeyB64) {
-    const clientPubKeyDer     = Buffer.from(clientPublicKeyB64, 'base64');
-    const sessionKey          = crypto.randomBytes(32);
-    const iv                  = crypto.randomBytes(12);
-    const cipher              = crypto.createCipheriv('aes-256-gcm', sessionKey, iv);
-    const encrypted           = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-    const authTag             = cipher.getAuthTag();
-    const encryptedSessionKey = crypto.publicEncrypt(
-        { key: crypto.createPublicKey({ key: clientPubKeyDer, format: 'der', type: 'spki' }),
-          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
-        sessionKey
-    );
-    return {
-        wrappedKey: encryptedSessionKey.toString('base64'),
-        iv:         iv.toString('base64'),
-        ciphertext: encrypted.toString('base64'),
-        tag:        authTag.toString('base64')
-    };
-}
-
 // ── Handler ──────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -60,6 +17,7 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(204).end();
     if (req.method !== 'POST')   return res.status(405).json({ error: 'Method Not Allowed' });
 
+    try {
     const { assetID } = req.query;
     if (!assetID || assetID === 'YOUR-ASSET-ID') {
         return res.status(400).json({ error: 'Missing or invalid assetID' });
@@ -162,4 +120,52 @@ export default async function handler(req, res) {
         console.error('Encryption error:', encErr);
         return res.status(500).json({ error: 'Server encryption failed: ' + encErr.message });
     }
+} catch (err) {
+        console.error('Unlock handler error:', err);
+        return res.status(500).json({ error: 'Internal server error' });
 }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function normalizeToHostname(raw) {
+    if (!raw) return '';
+    raw = raw.trim().toLowerCase();
+    try {
+        const u = new URL(raw.endsWith('/') ? raw.slice(0, -1) : raw);
+        return u.hostname;
+    } catch {
+        return raw
+            .replace(/^https?:\/\//, '')
+            .split('/')[0]
+            .split('?')[0]
+            .split('#')[0];
+    }
+}
+
+function deriveSegmentKey(assetSecret, assetID, segmentIndex) {
+    const masterKey = Buffer.from(process.env.SEGMENT_MASTER_KEY, 'hex');
+    const assetKey  = crypto.createHmac('sha256', masterKey).update(assetSecret).digest();
+    return crypto.createHmac('sha256', assetKey).update(`${assetID}:${segmentIndex}`).digest();
+}
+
+async function hybridEncrypt(plaintext, clientPublicKeyB64) {
+    const clientPubKeyDer     = Buffer.from(clientPublicKeyB64, 'base64');
+    const sessionKey          = crypto.randomBytes(32);
+    const iv                  = crypto.randomBytes(12);
+    const cipher              = crypto.createCipheriv('aes-256-gcm', sessionKey, iv);
+    const encrypted           = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+    const authTag             = cipher.getAuthTag();
+    const encryptedSessionKey = crypto.publicEncrypt(
+        { key: crypto.createPublicKey({ key: clientPubKeyDer, format: 'der', type: 'spki' }),
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+        sessionKey
+    );
+    return {
+        wrappedKey: encryptedSessionKey.toString('base64'),
+        iv:         iv.toString('base64'),
+        ciphertext: encrypted.toString('base64'),
+        tag:        authTag.toString('base64')
+    };
+}
+
