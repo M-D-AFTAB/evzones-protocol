@@ -194,7 +194,7 @@ export const processEvzonesVideo = async (file) => {
 };
 
 export const generateSmartAsset = async (asset, receivedId, vaultBaseUrl) => {
-    const VAULT_URL  = vaultBaseUrl || 'https://evzones-protocol.vercel.app';
+    const VAULT_URL  = vaultBaseUrl || 'https://evzones-protocol-git-security-changes-m-d-aftabs-projects.vercel.app'.replace(/\/$/, '');
     const codec      = asset.codec      || 'avc1.42E01E';
     const audioCodec = asset.audioCodec || 'mp4a.40.2';
     const brickB64   = uint8ToBase64(asset.brick);
