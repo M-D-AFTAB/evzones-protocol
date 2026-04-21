@@ -66,4 +66,3 @@ self.addEventListener('fetch', e => {
         }
     }));
 });
-// Note: This service worker is designed to be registered at the root scope ("/") to intercept requests to "/sw-video/*".
