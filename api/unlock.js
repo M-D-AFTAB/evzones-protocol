@@ -4,7 +4,52 @@ import { Resend } from 'resend';
 import crypto from 'crypto';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resend   = new Resend(process.env.RESEND_API_KEY);
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function normalizeToHostname(raw) {
+    if (!raw) return '';
+    raw = raw.trim().toLowerCase();
+    try {
+        const u = new URL(raw.endsWith('/') ? raw.slice(0, -1) : raw);
+        return u.hostname;
+    } catch {
+        return raw
+            .replace(/^https?:\/\//, '')
+            .split('/')[0]
+            .split('?')[0]
+            .split('#')[0];
+    }
+}
+
+function deriveSegmentKey(assetSecret, assetID, segmentIndex) {
+    const masterKey = Buffer.from(process.env.SEGMENT_MASTER_KEY, 'hex');
+    const assetKey  = crypto.createHmac('sha256', masterKey).update(assetSecret).digest();
+    return crypto.createHmac('sha256', assetKey).update(`${assetID}:${segmentIndex}`).digest();
+}
+
+async function hybridEncrypt(plaintext, clientPublicKeyB64) {
+    const clientPubKeyDer     = Buffer.from(clientPublicKeyB64, 'base64');
+    const sessionKey          = crypto.randomBytes(32);
+    const iv                  = crypto.randomBytes(12);
+    const cipher              = crypto.createCipheriv('aes-256-gcm', sessionKey, iv);
+    const encrypted           = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+    const authTag             = cipher.getAuthTag();
+    const encryptedSessionKey = crypto.publicEncrypt(
+        { key: crypto.createPublicKey({ key: clientPubKeyDer, format: 'der', type: 'spki' }),
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+        sessionKey
+    );
+    return {
+        wrappedKey: encryptedSessionKey.toString('base64'),
+        iv:         iv.toString('base64'),
+        ciphertext: encrypted.toString('base64'),
+        tag:        authTag.toString('base64')
+    };
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
     const origin = req.headers.origin || req.headers.referer || '';
@@ -12,13 +57,10 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
     if (req.method === 'OPTIONS') return res.status(204).end();
-    if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+    if (req.method !== 'POST')   return res.status(405).json({ error: 'Method Not Allowed' });
 
     const { assetID } = req.query;
-
-    // Guard against placeholder / missing IDs
     if (!assetID || assetID === 'YOUR-ASSET-ID') {
         return res.status(400).json({ error: 'Missing or invalid assetID' });
     }
@@ -27,134 +69,95 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Invalid assetID format' });
     }
 
-    // Require the client's RSA public key
-    const { publicKey: clientPublicKeyB64 } = req.body || {};
+    const { publicKey: clientPublicKeyB64, segmentStart = 0, segmentCount = 20 } = req.body || {};
     if (!clientPublicKeyB64) {
         return res.status(400).json({ error: 'Missing publicKey in request body' });
     }
 
-    console.log('Unlock request — asset:', assetID, '| origin:', origin);
+    const batchSize = Math.min(Math.max(parseInt(segmentCount) || 20, 1), 50);
 
-    // ── Fetch asset from DB ──────────────────────────────────────────────────
+    console.log(`Unlock — asset: ${assetID} | origin: ${origin} | segs: ${segmentStart}-${segmentStart + batchSize - 1}`);
+
     const { data: asset, error } = await supabase
-        .from('assets')
-        .select('*')
-        .eq('id', assetID)
-        .single();
+        .from('assets').select('*').eq('id', assetID).single();
 
-    if (error || !asset) {
-        console.error('DB error:', error);
-        return res.status(404).json({ error: 'Asset not found' });
+    if (error || !asset) return res.status(404).json({ error: 'Asset not found' });
+
+    // Kill switch
+    if (asset.killed) {
+        return res.status(403).json({ error: 'Asset has been deactivated by the owner' });
     }
 
-    // ── Domain whitelist check ───────────────────────────────────────────────
+    // Whitelist check
     let isWhitelisted = false;
+    const requestHostname = normalizeToHostname(origin);
 
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+    if (!requestHostname || requestHostname === 'localhost' || requestHostname === '127.0.0.1') {
         isWhitelisted = true;
     } else if (asset.whitelist) {
         const list = Array.isArray(asset.whitelist)
-            ? asset.whitelist
-            : asset.whitelist.split(',');
-
-        let hostname = '';
-        try { hostname = new URL(origin).hostname; }
-        catch { hostname = origin.replace(/^https?:\/\//, '').split('/')[0]; }
-
-        isWhitelisted = list.some(d => {
-            const clean = d.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
-            return hostname === clean || hostname.endsWith('.' + clean);
+            ? asset.whitelist : asset.whitelist.split(',');
+        isWhitelisted = list.some(entry => {
+            const clean = normalizeToHostname(entry);
+            if (!clean) return false;
+            return requestHostname === clean || requestHostname.endsWith('.' + clean);
         });
     }
 
     if (!isWhitelisted) {
-        console.log('BLOCKED:', origin);
-
+        console.log(`BLOCKED: ${origin} (${requestHostname})`);
         if (process.env.RESEND_API_KEY && asset.owner_email) {
             try {
                 await resend.emails.send({
-                    from: 'Sentinel Alerts <onboarding@resend.dev>',
-                    to: asset.owner_email,
+                    from:    'Sentinel Alerts <onboarding@resend.dev>',
+                    to:      asset.owner_email,
                     subject: 'Security alert: Unauthorized access attempt',
-                    html: `<h2>Security Alert</h2>
-                           <p><strong>Source:</strong> ${origin}</p>
-                           <p><strong>Asset:</strong> ${asset.file_name} (${assetID})</p>
-                           <p><strong>Time:</strong> ${new Date().toISOString()}</p>`
+                    html:    `<h2>Security Alert</h2>
+                              <p><strong>Source:</strong> ${origin}</p>
+                              <p><strong>Hostname:</strong> ${requestHostname}</p>
+                              <p><strong>Asset:</strong> ${asset.file_name} (${assetID})</p>
+                              <p><strong>Time:</strong> ${new Date().toISOString()}</p>`
                 });
             } catch (e) { console.error('Email failed:', e); }
         }
-
         return res.status(403).json({ error: 'Forbidden', message: 'Unauthorized domain' });
     }
 
-    // ── Normalize brain ──────────────────────────────────────────────────────
+    // Normalize brain
     let brain = asset.brain;
-    if (Buffer.isBuffer(brain)) {
-        brain = brain.toString('base64');
-    } else if (typeof brain === 'string') {
-        brain = brain.trim();
+    if (Buffer.isBuffer(brain)) brain = brain.toString('base64');
+    else if (typeof brain === 'string') {
+        brain = brain.trim().replace(/\s/g, '');
         if (brain.startsWith('[')) {
-            try { const p = JSON.parse(brain); if (Array.isArray(p)) brain = p.join(''); } catch { }
+            try { const p = JSON.parse(brain); if (Array.isArray(p)) brain = p.join(''); } catch {}
         }
     }
 
-    brain = brain.replace(/\s/g, '');
-
-    const b64Pattern = /^[A-Za-z0-9+/]+=*$/;
-    if (!b64Pattern.test(brain)) {
-        console.error('Invalid base64 brain');
-        return res.status(500).json({ error: 'Corrupted brain data' });
+    if (!process.env.SEGMENT_MASTER_KEY) {
+        return res.status(500).json({ error: 'Server configuration error: missing SEGMENT_MASTER_KEY' });
     }
 
-    // ── RSA-OAEP encrypt the sensitive payload with client's public key ──────
-    // The payload { brain, key, kid } is encrypted in Node using the client's
-    // one-time RSA public key. The network tab shows only opaque binary —
-    // the raw key and brain are never transmitted in plaintext.
-    //
-    // RSA-OAEP with 2048-bit key can encrypt max ~214 bytes. Our payload
-    // (brain ~1872 chars base64 + 32+32 hex) is too large for direct RSA,
-    // so we use HYBRID encryption:
-    //   1. Generate a one-time AES-256-GCM session key server-side
-    //   2. Encrypt the JSON payload with AES-GCM
-    //   3. Encrypt the session key with client's RSA public key
-    //   4. Send both to client — client RSA-decrypts the session key,
-    //      then AES-decrypts the payload
-    try {
-        // Import client's RSA public key (DER/SPKI base64)
-        const clientPubKeyDer = Buffer.from(clientPublicKeyB64, 'base64');
+    // Kill switch ping (segmentStart === -1) — just validates kill status, returns nothing else
+    if (parseInt(segmentStart) === -1) {
+        return res.status(200).json({ ok: true });
+    }
 
-        // Generate one-time AES-256-GCM session key
-        const sessionKey = crypto.randomBytes(32);
-        const iv = crypto.randomBytes(12);
-
-        // Encrypt payload with AES-256-GCM
-        const plaintext = JSON.stringify({ brain, key: asset.key, kid: asset.kid });
-        const cipher = crypto.createCipheriv('aes-256-gcm', sessionKey, iv);
-        const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-        const authTag = cipher.getAuthTag();
-
-        // Encrypt session key with client RSA public key
-        const encryptedSessionKey = crypto.publicEncrypt(
-            {
-                key: crypto.createPublicKey({ key: clientPubKeyDer, format: 'der', type: 'spki' }),
-                padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-                oaepHash: 'sha256'
-            },
-            sessionKey
-        );
-
-        console.log('Authorized — payload encrypted with RSA+AES hybrid');
-
-        // Client receives: RSA-encrypted session key + AES-GCM ciphertext
-        return res.status(200).json({
-            // RSA-encrypted AES session key
-            wrappedKey: encryptedSessionKey.toString('base64'),
-            // AES-GCM encrypted payload
-            iv: iv.toString('base64'),
-            ciphertext: encrypted.toString('base64'),
-            tag: authTag.toString('base64'),
+    // Derive segment keys
+    const segmentKeys = [];
+    for (let i = segmentStart; i < segmentStart + batchSize; i++) {
+        segmentKeys.push({
+            index: i,
+            key:   deriveSegmentKey(asset.asset_secret, assetID, i).toString('hex')
         });
+    }
 
+    const payload = parseInt(segmentStart) === 0
+        ? { brain, segmentKeys, segmentCount: asset.segment_count }
+        : { segmentKeys };
+
+    try {
+        const encrypted = await hybridEncrypt(JSON.stringify(payload), clientPublicKeyB64);
+        return res.status(200).json(encrypted);
     } catch (encErr) {
         console.error('Encryption error:', encErr);
         return res.status(500).json({ error: 'Server encryption failed: ' + encErr.message });
