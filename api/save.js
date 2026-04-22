@@ -87,7 +87,15 @@ export default async function handler(req, res) {
             return res.status(500).json({ error: 'Database error', detail: error.message });
         }
 
-        return res.status(200).json({ assetID: data[0].id });
+        // Derive the ingest token for this asset.
+        // The Studio passes this back to /api/unlock to bypass the domain whitelist
+        // during the ingest-time transport key fetch. The token is HMAC-derived from
+        // the asset secret — unique per asset, cryptographically tied to this server.
+        const masterKey   = Buffer.from(process.env.SEGMENT_MASTER_KEY, 'hex');
+        const assetKey    = crypto.createHmac('sha256', masterKey).update(assetSecret).digest();
+        const ingestToken = crypto.createHmac('sha256', assetKey).update('ingest').digest('hex');
+
+        return res.status(200).json({ assetID: data[0].id, ingestToken });
 
     } catch (err) {
         console.error('Save handler error:', err);

@@ -201,8 +201,9 @@ const encryptTempKeys = async (tempKeys, transportKeyHex) => {
 };
 
 // Perform the vault handshake to get the transport key.
-// Called once at ingest time (right after save) and on every playback.
-const fetchTransportKey = async (assetID, vaultBaseUrl) => {
+// ingestToken (optional): pass during ingest to bypass domain whitelist.
+// At playback time, no token is passed — whitelist check applies instead.
+const fetchTransportKey = async (assetID, vaultBaseUrl, ingestToken = null) => {
     const keyPair = await crypto.subtle.generateKey(
         { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
         false, ['decrypt']
@@ -210,10 +211,13 @@ const fetchTransportKey = async (assetID, vaultBaseUrl) => {
     const pubKeyDer = await crypto.subtle.exportKey('spki', keyPair.publicKey);
     const pubKeyB64 = uint8ToBase64(new Uint8Array(pubKeyDer));
 
+    const body = { publicKey: pubKeyB64 };
+    if (ingestToken) body.ingestToken = ingestToken;
+
     const res = await fetch(`${vaultBaseUrl}/api/unlock?assetID=${assetID}`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ publicKey: pubKeyB64 })
+        body:    JSON.stringify(body)
     });
 
     if (!res.ok) {
@@ -308,15 +312,23 @@ export const processEvzonesVideo = async (file) => {
     };
 };
 
-export const generateSmartAsset = async (data, assetID, vaultBaseUrl) => {
+// Derive the ingest token client-side so the server can verify it.
+// ingestToken = HMAC(HMAC(masterKey, assetSecret), 'ingest')
+// We can't do the full HMAC here (masterKey is server-only), so instead
+// the server sends us the ingestToken in the /api/save response.
+// See EvzonesStudio.jsx — save.js returns { assetID, ingestToken }.
+export const generateSmartAsset = async (data, assetID, vaultBaseUrl, ingestToken) => {
     const VAULT_URL  = (vaultBaseUrl || 'https://evzones-protocol.vercel.app').replace(/\/$/, '');
     const codec      = data.codec      || 'avc1.42E01E';
     const audioCodec = data.audioCodec || 'mp4a.40.2';
 
-    console.log('[Engine] Fetching transport key for key encryption...');
-    // Fetch the transport key from the vault to encrypt the tempKeys blob.
-    // This is the INGEST unlock — happens once, server returns transportKey.
-    const authData = await fetchTransportKey(assetID, VAULT_URL);
+    if (!ingestToken) {
+        throw new Error('ingestToken is required for generateSmartAsset — check /api/save returns it');
+    }
+
+    console.log('[Engine] Fetching transport key for key encryption (ingest mode)...');
+    // Pass ingestToken so the server bypasses the domain whitelist for this call.
+    const authData = await fetchTransportKey(assetID, VAULT_URL, ingestToken);
 
     if (!authData.transportKey) {
         throw new Error('Vault did not return a transport key');

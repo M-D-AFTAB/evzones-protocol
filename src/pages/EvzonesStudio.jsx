@@ -56,8 +56,9 @@ export default function EvzonesStudio() {
                 throw new Error(`Save failed: ${saveRes.status} — ${errBody.error || saveRes.statusText}`);
             }
 
-            const { assetID } = await saveRes.json();
-            if (!assetID) throw new Error('Server did not return an asset ID');
+            const { assetID, ingestToken } = await saveRes.json();
+            if (!assetID)     throw new Error('Server did not return an asset ID');
+            if (!ingestToken) throw new Error('Server did not return an ingest token');
             console.log('Asset saved — ID:', assetID);
 
             // ── Step 3 & 4: Generate Smart Asset HTML ─────────────────────────
@@ -66,7 +67,7 @@ export default function EvzonesStudio() {
             //   b. Encrypts tempKeys[] with transport key → ENC_KEYS_B64
             //   c. Embeds ENC_KEYS_B64 + encrypted brick in the output HTML
             setProgress('Fetching transport key and generating asset...');
-            const smartHtml = await generateSmartAsset(data, assetID, VAULT_URL);
+            const smartHtml = await generateSmartAsset(data, assetID, VAULT_URL, ingestToken);
 
             setResult({ smartHtml, assetID });
             setStatus('SUCCESS');
