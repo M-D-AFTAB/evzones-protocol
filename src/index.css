@@ -1,20 +1,17 @@
 /* src/index.css */
 :root {
-  --bg-dark: #091a32;
-  --bg-light: #f4f6f9;
-  --panel-dark: #12243d;
-  --text-main: #ffffff;
-  --text-muted: #8ca0b3;
-  --evzones-blue: #008eff;
-  --evzones-green: #2ecc71;
+  --bg-dark: #030200;
+  --text-main: #f0e8d0;
+  --text-muted: rgba(180,110,15,0.55);
 }
 
 body {
   margin: 0;
-  font-family: 'Public Sans', sans-serif;
-  background-color: var(--bg-dark);
+  font-family: 'DM Sans', sans-serif;
+  background: radial-gradient(ellipse at 50% 48%, #3a1800 0%, #180900 30%, #080400 65%, #030200 100%);
   color: var(--text-main);
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
 .App {
@@ -22,5 +19,4 @@ body {
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  padding: 20px;
 }
