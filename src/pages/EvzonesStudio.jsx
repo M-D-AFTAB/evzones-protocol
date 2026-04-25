@@ -1,5 +1,6 @@
 // src/pages/EvzonesStudio.jsx
-import React, { useState } from 'react';
+import React, { useState } from "react";
+import { useAuth } from "../context/AuthContext";
 import { processEvzonesVideo, generateSmartAsset } from '../utils/evzonesEngine';
 
 const IcUpload = () => <span style={{ fontSize: '3rem' }}>📄</span>;
@@ -11,7 +12,9 @@ const IcGlobe  = () => <span>🌐</span>;
 export default function EvzonesStudio() {
     const [file, setFile]                   = useState(null);
     const [whitelist, setWhitelist]         = useState('');
-    const [email, setEmail]                 = useState('');
+    // Email comes from authenticated user - no need to ask
+    const { user } = useAuth();
+    const email = user?.email || "";
     const [trackingActive, setTracking]     = useState(true);
     const [status, setStatus]               = useState('Standby');
     const [result, setResult]               = useState(null);
