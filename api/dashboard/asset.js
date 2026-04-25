@@ -1,7 +1,7 @@
 // api/dashboard/asset.js
 // GET /api/dashboard/asset?id=<uuid>
 // Returns a single asset with its sessions (used by the live tracking modal
-// to refresh every 5 seconds without reloading all assets).
+// to refresh every 5 seconds without reloading all assets)..
 
 import { createClient } from '@supabase/supabase-js';
 
