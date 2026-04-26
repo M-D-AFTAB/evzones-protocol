@@ -610,7 +610,7 @@ export default function Landing() {
                 transition={{duration:0.9,delay:0.32,ease:[0.22,1,0.36,1]}}
                 style={{
                   fontFamily:FD, fontWeight:700,
-                  fontSize:"clamp(26px, 9vw, 86px)",
+                  fontSize:"clamp(25px, 9vw, 86px)",
                   letterSpacing:"0.04em", lineHeight:1.0,
                   textTransform:"uppercase",
                   wordBreak:"break-word", overflowWrap:"break-word",
