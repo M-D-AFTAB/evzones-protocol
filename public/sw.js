@@ -1,209 +1,207 @@
-// public/sw.js
-// ─────────────────────────────────────────────────────────────────────────────
-// SERVICE WORKER — Safari Range Request bridge
-// ─────────────────────────────────────────────────────────────────────────────
-// WHY THIS EXISTS
-// ───────────────
-// Safari on macOS supports MSE, but Safari on iOS does NOT. iOS Safari requires
-// a plain <video src="..."> with a byte-range-capable server. Since our data
-// lives in memory (not on a real server), we intercept fetch requests from the
-// video element with this Service Worker and serve the stitched brain+brick
-// from memory using the correct HTTP 206 Partial Content protocol.
-//
-// WHAT WAS BROKEN IN THE UPGRADE ATTEMPT
-// ───────────────────────────────────────
-// The original sw.js was actually CORRECT for the Base64 case — it received
-// pre-decrypted Uint8Arrays via postMessage and served them directly.
-//
-// The upgrade attempt tried to do decryption INSIDE the Service Worker, which
-// breaks because:
-//   1. Service Workers can't easily do async crypto on postMessage data
-//   2. The key architecture changed (HMAC derivation) but SW wasn't updated
-//   3. The SW still expected the old single-key format
-//
-// THE FIX
-// ───────
-// Keep the SW simple: it only handles Range Requests for pre-decrypted data.
-// The main thread (HTML page) handles ALL crypto and posts the decrypted
-// brain+brick to the SW via postMessage AFTER decryption is complete.
-// The SW just serves bytes efficiently, handling all Range Request edge cases.
-//
-// SAFARI-SPECIFIC REQUIREMENTS FOR RANGE REQUESTS
-// ────────────────────────────────────────────────
-// Safari is strict about these headers. Missing any will cause playback failure:
-//   ✓ Content-Type: video/mp4
-//   ✓ Content-Length: <exact byte count for this range>
-//   ✓ Content-Range: bytes <start>-<end>/<total>  (for 206 responses)
-//   ✓ Accept-Ranges: bytes  (must always be present)
-//   ✓ Status 206 for range requests, 200 for full requests
-//   ✓ Content-Length on 200 responses must be the FULL file size
-// ─────────────────────────────────────────────────────────────────────────────
+// public/sw.js — V3 OPFS + AES-CTR seek + Safari 206 range requests
+// (full file — see evzonesEngine.js for architecture notes)
 
-// In-memory store: videoId → { brain: Uint8Array, brick: Uint8Array, total: number }
-// Videos are registered via postMessage from the main thread.
-const videoCache = new Map();
+const assets = new Map();
 
-// ── Service Worker lifecycle ──────────────────────────────────────────────────
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 
-self.addEventListener('install', () => {
-    // Skip waiting so the new SW activates immediately without requiring a page reload
-    self.skipWaiting();
-});
-
-self.addEventListener('activate', (event) => {
-    // Claim all clients immediately so the SW intercepts requests for the current page
-    event.waitUntil(self.clients.claim());
-});
-
-// ── Message handler (main thread → SW) ───────────────────────────────────────
-
-self.addEventListener('message', (event) => {
-    const { type, id, brain, brick } = event.data || {};
-
-    if (type === 'REGISTER_VIDEO') {
-        if (!id || !brain || !brick) {
-            console.error('[SW] REGISTER_VIDEO: missing id, brain, or brick');
-            return;
-        }
-
-        // Brain and brick arrive as ArrayBuffer (transferable) or Uint8Array
-        const brainArr = brain instanceof Uint8Array ? brain : new Uint8Array(brain);
-        const brickArr = brick instanceof Uint8Array ? brick : new Uint8Array(brick);
-
-        videoCache.set(id, {
-            brain: brainArr,
-            brick: brickArr,
-            total: brainArr.byteLength + brickArr.byteLength
-        });
-
-        console.log('[SW] Registered video:', id,
-                    '| Brain:', brainArr.byteLength, 'B',
-                    '| Brick:', brickArr.byteLength, 'B',
-                    '| Total:', brainArr.byteLength + brickArr.byteLength, 'B');
-
-        // Acknowledge to the main thread
-        if (event.source) {
-            event.source.postMessage({ type: 'REGISTERED', id });
-        }
+self.addEventListener('message', async (event) => {
+    const msg  = event.data || {};
+    const port = event.ports[0];
+    if (msg.type === 'REGISTER_ASSET') {
+        try { await registerAsset(msg); port?.postMessage({ ok: true }); }
+        catch (err) { console.error('[SW] Register failed:', err); port?.postMessage({ error: err.message }); }
     }
-
-    if (type === 'UNREGISTER_VIDEO') {
-        videoCache.delete(id);
-        console.log('[SW] Unregistered video:', id);
-    }
+    if (msg.type === 'UNREGISTER_ASSET') { assets.delete(msg.id); port?.postMessage({ ok: true }); }
 });
 
-// ── Fetch intercept ───────────────────────────────────────────────────────────
+async function registerAsset(msg) {
+    const brainU8   = b64ToU8(msg.brainB64);
+    const baseIV    = hexToU8(msg.baseIVHex);
+    const cryptoKeys = await Promise.all(
+        msg.tempKeys.map(hex =>
+            crypto.subtle.importKey('raw', hexToU8(hex), { name: 'AES-CTR' }, false, ['decrypt'])
+        )
+    );
+    assets.set(msg.id, {
+        opfsName: msg.opfsName, brainU8, brainLen: brainU8.byteLength,
+        cryptoKeys, baseIV, segmentSize: msg.segmentSize,
+        segmentCount: msg.segmentCount, brickBytes: msg.brickBytes,
+        totalBytes: brainU8.byteLength + msg.brickBytes, mimeType: msg.mimeType
+    });
+    console.log('[SW] Registered:', msg.id, '| total:', brainU8.byteLength + msg.brickBytes, 'B');
+}
 
-self.addEventListener('fetch', (event) => {
+self.addEventListener('fetch', event => {
     const url = new URL(event.request.url);
-
-    // Only intercept our virtual video URLs: /sw-video/<id>
     if (!url.pathname.startsWith('/sw-video/')) return;
-
     event.respondWith(handleVideoRequest(event.request, url));
 });
 
 async function handleVideoRequest(request, url) {
-    const id  = url.pathname.slice('/sw-video/'.length);
-    const vid = videoCache.get(id);
+    const assetID = url.pathname.slice('/sw-video/'.length).replace(/\.mp4$/, '');
+    const asset   = assets.get(assetID);
 
-    if (!vid) {
-        console.warn('[SW] Video not found:', id);
-        return new Response('Video not registered', { status: 404 });
+    if (!asset) {
+        return new Response('Asset not registered', {
+            status: 404,
+            headers: { 'Accept-Ranges': 'bytes', 'Content-Type': 'text/plain' }
+        });
     }
 
-    const { brain, brick, total } = vid;
-    const brainLen = brain.byteLength;
+    const { totalBytes, mimeType } = asset;
 
-    // ── Parse Range header ───────────────────────────────────────────────────
+    if (request.method === 'HEAD') {
+        return new Response(null, { status: 200, headers: makeHeaders(mimeType, totalBytes, null) });
+    }
+
     const rangeHeader = request.headers.get('range');
-    let start = 0;
-    let end   = total - 1;
-    let isRangeRequest = false;
+    let start = 0, end = totalBytes - 1, isRange = false;
 
     if (rangeHeader) {
-        isRangeRequest = true;
-        const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
-        if (!match) {
-            // Malformed Range header — return 416 Range Not Satisfiable
+        isRange = true;
+        const m = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
+        if (!m) {
             return new Response('Range Not Satisfiable', {
-                status: 416,
-                headers: { 'Content-Range': `bytes */${total}` }
+                status: 416, headers: { 'Content-Range': `bytes */${totalBytes}`, 'Accept-Ranges': 'bytes' }
             });
         }
-        start = parseInt(match[1], 10);
-        end   = match[2] ? parseInt(match[2], 10) : total - 1;
-
-        // Clamp to valid range
-        if (start >= total || end >= total || start > end) {
+        start = parseInt(m[1], 10);
+        end   = m[2] !== '' ? parseInt(m[2], 10) : totalBytes - 1;
+        if (start >= totalBytes) {
             return new Response('Range Not Satisfiable', {
-                status: 416,
-                headers: { 'Content-Range': `bytes */${total}` }
+                status: 416, headers: { 'Content-Range': `bytes */${totalBytes}`, 'Accept-Ranges': 'bytes' }
             });
         }
+        end = Math.min(end, totalBytes - 1);
     }
 
     const length = end - start + 1;
-
-    // ── Build ReadableStream from brain+brick byte ranges ────────────────────
-    // Safari sends many small Range Requests (sometimes just 2 bytes for the
-    // ftyp box probe). We must handle all of them efficiently without loading
-    // the full file into a new array each time.
-    const CHUNK_SIZE = 256 * 1024; // 256KB chunks — good balance for Safari
-
-    const stream = new ReadableStream({
-        start(controller) {
-            let pos = start;
-
-            function push() {
-                if (pos > end) {
-                    controller.close();
-                    return;
-                }
-
-                const chunkEnd  = Math.min(pos + CHUNK_SIZE - 1, end);
-                const chunkSize = chunkEnd - pos + 1;
-                const out       = new Uint8Array(chunkSize);
-
-                // Fill chunk from brain+brick virtual address space
-                for (let i = 0; i < chunkSize; i++) {
-                    const abs = pos + i;
-                    out[i] = abs < brainLen
-                        ? brain[abs]
-                        : brick[abs - brainLen];
-                }
-
-                controller.enqueue(out);
-                pos = chunkEnd + 1;
-
-                // Yield to event loop between chunks to prevent blocking
-                setTimeout(push, 0);
-            }
-
-            push();
-        },
-        cancel() {
-            // Stream was cancelled (e.g. user skipped) — nothing to clean up
-        }
-    });
-
-    // ── Build response headers ───────────────────────────────────────────────
-    // Safari is strict: all of these must be present and correct.
-    const headers = new Headers({
-        'Content-Type':   'video/mp4',
-        'Content-Length': String(length),
-        'Accept-Ranges':  'bytes',
-        // Cache-Control: no-store prevents Safari from caching the decrypted video
-        'Cache-Control':  'no-store, no-cache'
-    });
-
-    if (isRangeRequest) {
-        headers.set('Content-Range', `bytes ${start}-${end}/${total}`);
-    }
+    const stream = buildStream(asset, start, end);
 
     return new Response(stream, {
-        status:  isRangeRequest ? 206 : 200,
-        headers
+        status:     isRange ? 206 : 200,
+        statusText: isRange ? 'Partial Content' : 'OK',
+        headers:    makeHeaders(mimeType, length, isRange ? `bytes ${start}-${end}/${totalBytes}` : null)
     });
+}
+
+function makeHeaders(mimeType, len, contentRange) {
+    const h = new Headers({
+        'Content-Type':   mimeType,
+        'Content-Length': String(len),
+        'Accept-Ranges':  'bytes',
+        'Cache-Control':  'no-store'
+    });
+    if (contentRange) h.set('Content-Range', contentRange);
+    return h;
+}
+
+function buildStream(asset, vStart, vEnd) {
+    const { brainU8, brainLen } = asset;
+    return new ReadableStream({
+        async start(controller) {
+            try {
+                let pos = vStart;
+
+                // Brain region (in RAM, serve directly)
+                if (pos <= vEnd && pos < brainLen) {
+                    const sliceEnd = Math.min(vEnd + 1, brainLen);
+                    controller.enqueue(brainU8.slice(pos, sliceEnd));
+                    pos = sliceEnd;
+                }
+
+                // Brick region (OPFS, decrypt on-the-fly)
+                if (pos <= vEnd && pos >= brainLen) {
+                    await streamBrickRange(asset, controller, pos, vEnd);
+                }
+
+                controller.close();
+            } catch (err) {
+                console.error('[SW] Stream error:', err);
+                controller.error(err);
+            }
+        }
+    });
+}
+
+async function streamBrickRange(asset, controller, vStart, vEnd) {
+    const { opfsName, cryptoKeys, baseIV, segmentSize, brickBytes, brainLen } = asset;
+
+    const bStart = vStart - brainLen; // brick-relative start
+    const bEnd   = vEnd   - brainLen; // brick-relative end (inclusive)
+
+    const opfsRoot   = await navigator.storage.getDirectory();
+    const fileHandle = await opfsRoot.getFileHandle(opfsName);
+    const file       = await fileHandle.getFile();
+
+    const firstSeg = Math.floor(bStart / segmentSize);
+    const lastSeg  = Math.floor(bEnd   / segmentSize);
+
+    for (let si = firstSeg; si <= lastSeg; si++) {
+        const segEncStart  = si * segmentSize;
+        const segEncEnd    = Math.min(segEncStart + segmentSize, brickBytes) - 1;
+
+        const rangeInSegStart = Math.max(bStart, segEncStart);
+        const rangeInSegEnd   = Math.min(bEnd,   segEncEnd);
+        const offsetInSeg     = rangeInSegStart - segEncStart;
+
+        // AES-CTR seek: jump to the right 16-byte block
+        const blockIndex   = Math.floor(offsetInSeg / 16);
+        const skippedBytes = offsetInSeg % 16;
+        const counter      = addToIV(makeSegmentIV(baseIV, si), blockIndex);
+
+        // Read ONLY the needed encrypted bytes from disk
+        const fileReadStart = segEncStart + blockIndex * 16;
+        const fileReadEnd   = segEncEnd + 1; // Blob.slice end is exclusive
+
+        const encBuf = await file.slice(fileReadStart, fileReadEnd).arrayBuffer();
+
+        // Decrypt the block-aligned chunk
+        const decBuf = await crypto.subtle.decrypt(
+            { name: 'AES-CTR', counter, length: 128 },
+            cryptoKeys[si],
+            encBuf
+        );
+
+        // Slice out exactly the bytes the caller wants
+        const wantedBytes = rangeInSegEnd - rangeInSegStart + 1;
+        controller.enqueue(new Uint8Array(decBuf, skippedBytes, wantedBytes));
+    }
+}
+
+function makeSegmentIV(baseIV, segIdx) {
+    const iv = new Uint8Array(16);
+    iv.set(baseIV.slice(0, 8), 0);
+    let n = segIdx;
+    for (let b = 15; b >= 8 && n > 0; b--) {
+        iv[b] = n & 0xff;
+        n = Math.floor(n / 256);
+    }
+    return iv;
+}
+
+function addToIV(iv, delta) {
+    const out = new Uint8Array(iv);
+    let carry = delta;
+    for (let b = 15; b >= 0 && carry > 0; b--) {
+        const sum = out[b] + (carry & 0xff);
+        out[b]    = sum & 0xff;
+        carry     = Math.floor(carry / 256) + (sum >> 8);
+    }
+    return out;
+}
+
+function b64ToU8(b64) {
+    const bin = atob(b64.replace(/\s/g, ''));
+    const u8  = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+}
+
+function hexToU8(hex) {
+    const u8 = new Uint8Array(hex.length >> 1);
+    for (let i = 0; i < hex.length; i += 2) u8[i >> 1] = parseInt(hex.substr(i, 2), 16);
+    return u8;
 }

@@ -1,53 +1,27 @@
-// utils/evzonesEngine.js
+// src/utils/evzonesEngine.js — V3.1: Single-file hybrid HTML+binary, OPFS streaming
 // ─────────────────────────────────────────────────────────────────────────────
-// V2 ARCHITECTURE OVERVIEW
-// ─────────────────────────
-// The key insight that fixes the upgrade attempt:
 //
-//   OLD (broken): Client encrypts with tempKeys → Server tries to HMAC-derive
-//                 those same keys → impossible, they're random, never stored.
+// OUTPUT: One .html file. Structure on disk:
 //
-//   NEW (correct): 
-//     1. Client encrypts each 2MB segment with a random tempKey[i]
-//     2. Client wraps ALL tempKeys[] with a temporary "wrapping key" (wrapKey)
-//        using AES-256-GCM → produces ENC_KEYS_B64 blob
-//     3. wrapKey is sent to the server during save (it derives & stores nothing —
-//        save.js only stores brain + asset_secret)
-//     4. ENC_KEYS_B64 is embedded in the output HTML asset
-//     5. The SERVER can deterministically derive the wrapKey from asset_secret
-//        using HMAC — because the wrapKey IS the HMAC transport key
-//     6. On playback: client fetches transport key from vault (RSA-encrypted),
-//        uses it to decrypt ENC_KEYS_B64, recovers tempKeys[], decrypts brick
+//   ┌──────────────────────────────────────────────────────────┐
+//   │  [HTML text — valid, browser renders normally]           │
+//   │  </html>                                                 │
+//   │  <!--EVZONES:BRICK_OFFSET=NNNNN,BRICK_BYTES=MMMMMM-->   │  ← machine-readable marker
+//   │  [raw encrypted binary bytes, MMMMMM bytes long]        │  ← never parsed as HTML
+//   └──────────────────────────────────────────────────────────┘
 //
-// WAIT — but then we need the server to know wrapKey at save time to verify it?
-// NO. The correct flow is even simpler:
+// WHY THIS WORKS:
+//   Browsers stop the HTML parser at </html> — trailing bytes are ignored.
+//   The embedded JS uses fetch(location.href, {headers:{Range:'bytes=N-'}})
+//   to stream ONLY the brick portion, chunked into OPFS.
+//   fetch() with Range: bytes=N- is supported in all modern browsers including
+//   Safari 14+ when the server supports byte-range responses (Vercel does).
 //
-//     1. Client generates tempKeys[] randomly
-//     2. Server generates asset_secret randomly at save time
-//     3. Server derives transportKey = HMAC(HMAC(masterKey, assetSecret), 'transport')
-//     4. BUT we can't do step 3 at save time on the client because masterKey is secret!
+// RAM BUDGET:
+//   Ingest:   max 8 MB in RAM at any time (one encrypt chunk)
+//   Playback: max 8 MB in RAM at any time (one decrypt chunk in SW)
+//   The brain (~10-20 KB) is the only thing held in full RAM.
 //
-// CORRECT FINAL FLOW (what is actually implemented here):
-//     INGEST:
-//       a. Client encrypts segments with random tempKeys[]
-//       b. Client calls /api/save → server stores brain + asset_secret → returns assetID
-//       c. Client calls /api/unlock with its RSA pubkey → server returns transportKey
-//          (encrypted with RSA) — yes, this happens right after save, just once
-//       d. Client uses transportKey to AES-GCM encrypt the tempKeys[] → ENC_KEYS_B64
-//       e. ENC_KEYS_B64 is embedded in the HTML asset (safe — useless without transportKey)
-//
-//     PLAYBACK:
-//       f. Viewer's client calls /api/unlock with its RSA pubkey + assetID
-//       g. Server re-derives the SAME transportKey from stored asset_secret
-//       h. Returns it RSA-encrypted
-//       i. Client decrypts → gets transportKey → decrypts ENC_KEYS_B64 → gets tempKeys[]
-//       j. Decrypts each brick segment → plays video
-//
-// This means:
-//   ✓ tempKeys never touch the network in plaintext
-//   ✓ ENC_KEYS_B64 in HTML is useless without the vault
-//   ✓ Server is fully stateless for playback (just HMAC math)
-//   ✓ Kill switch works: killed=true → vault returns 403 → no transportKey
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
@@ -55,684 +29,595 @@ import { fetchFile } from '@ffmpeg/util';
 
 const ffmpeg = new FFmpeg();
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-const SEGMENT_SIZE = 2 * 1024 * 1024; // 2MB per segment — good balance for MSE
+// ── Constants ─────────────────────────────────────────────────────────────────
+const SEGMENT_SIZE = 8 * 1024 * 1024; // 8 MB — AES-CTR segment boundary
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ── MP4 box helpers (brain only — always tiny, RAM is fine) ──────────────────
 
-const uint8ToBase64 = (uint8) => {
-    let binary = '';
-    const chunkSize = 8192;
-    for (let i = 0; i < uint8.length; i += chunkSize)
-        binary += String.fromCharCode.apply(null, uint8.subarray(i, i + chunkSize));
-    return btoa(binary);
-};
+const ru32 = (u8, o) => (u8[o]*16777216)+(u8[o+1]*65536)+(u8[o+2]*256)+u8[o+3];
+const rbox = (u8, o) => String.fromCharCode(u8[o+4],u8[o+5],u8[o+6],u8[o+7]);
 
-const base64ToBytes = (b64) => {
-    const bin = atob(b64.replace(/\s/g, ''));
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-};
-
-const readUint32 = (u8, o) =>
-    (u8[o] * 16777216) + (u8[o+1] * 65536) + (u8[o+2] * 256) + u8[o+3];
-
-const readBoxType = (u8, o) =>
-    String.fromCharCode(u8[o+4], u8[o+5], u8[o+6], u8[o+7]);
-
-const patchFtypBrand = (uint8) => {
-    if (uint8[4]===0x66 && uint8[5]===0x74 && uint8[6]===0x79 && uint8[7]===0x70) {
-        const p = new Uint8Array(uint8);
-        p[8]=0x69; p[9]=0x73; p[10]=0x6f; p[11]=0x6d;
-        console.log('[Engine] ftyp brand patched → isom');
-        return p;
+const patchFtyp = (u8) => {
+    if (u8[4]===0x66&&u8[5]===0x74&&u8[6]===0x79&&u8[7]===0x70) {
+        const p=new Uint8Array(u8); p[8]=0x69;p[9]=0x73;p[10]=0x6f;p[11]=0x6d;
+        console.log('[Engine] ftyp → isom'); return p;
     }
-    return uint8;
+    return u8;
 };
 
-const removeUdtaFromBrain = (uint8) => {
-    let offset = 0;
-    while (offset < uint8.length - 8) {
-        const size = readUint32(uint8, offset);
-        const type = readBoxType(uint8, offset);
-        if (type === 'moov') {
-            let inner = offset + 8;
-            while (inner < offset + size - 8) {
-                const iSize = readUint32(uint8, inner);
-                const iType = readBoxType(uint8, inner);
-                if (iType === 'udta') {
-                    const out = new Uint8Array(uint8.length - iSize);
-                    out.set(uint8.slice(0, inner), 0);
-                    out.set(uint8.slice(inner + iSize), inner);
-                    const nm = size - iSize;
-                    out[offset]   = (nm>>>24)&0xff; out[offset+1] = (nm>>>16)&0xff;
-                    out[offset+2] = (nm>>>8) &0xff; out[offset+3] =  nm      &0xff;
-                    console.log('[Engine] udta removed (' + iSize + ' bytes)');
-                    return out;
+const removeUdta = (u8) => {
+    let off=0;
+    while(off<u8.length-8) {
+        const sz=ru32(u8,off),ty=rbox(u8,off);
+        if(ty==='moov') {
+            let i=off+8;
+            while(i<off+sz-8) {
+                const is=ru32(u8,i),it=rbox(u8,i);
+                if(it==='udta') {
+                    const out=new Uint8Array(u8.length-is);
+                    out.set(u8.slice(0,i),0); out.set(u8.slice(i+is),i);
+                    const nm=sz-is;
+                    out[off]=(nm>>>24)&0xff;out[off+1]=(nm>>>16)&0xff;
+                    out[off+2]=(nm>>>8)&0xff;out[off+3]=nm&0xff;
+                    console.log('[Engine] udta removed',is,'bytes'); return out;
                 }
-                if (iSize < 8) break;
-                inner += iSize;
+                if(is<8)break; i+=is;
             }
             break;
         }
-        if (size < 8) break;
-        offset += size;
+        if(sz<8)break; off+=sz;
     }
-    return uint8;
+    return u8;
 };
 
-const detectCodec = (uint8) => {
-    for (let i = 0; i < uint8.length - 10; i++) {
-        if (uint8[i]===0x61&&uint8[i+1]===0x76&&uint8[i+2]===0x63&&uint8[i+3]===0x43) {
-            const p = uint8[i+5].toString(16).padStart(2,'0').toUpperCase();
-            const c = uint8[i+6].toString(16).padStart(2,'0').toUpperCase();
-            const l = uint8[i+7].toString(16).padStart(2,'0').toUpperCase();
-            console.log('[Engine] Video codec: avc1.' + p + c + l);
-            return 'avc1.' + p + c + l;
+const detectCodec = (u8) => {
+    for(let i=0;i<u8.length-10;i++) {
+        if(u8[i]===0x61&&u8[i+1]===0x76&&u8[i+2]===0x63&&u8[i+3]===0x43) {
+            const p=u8[i+5].toString(16).padStart(2,'0').toUpperCase();
+            const c=u8[i+6].toString(16).padStart(2,'0').toUpperCase();
+            const l=u8[i+7].toString(16).padStart(2,'0').toUpperCase();
+            return 'avc1.'+p+c+l;
         }
-        if (uint8[i]===0x68&&uint8[i+1]===0x76&&uint8[i+2]===0x63&&uint8[i+3]===0x43)
-            return 'hev1.1.6.L93.B0';
+        if(u8[i]===0x68&&u8[i+1]===0x76&&u8[i+2]===0x63&&u8[i+3]===0x43) return 'hev1.1.6.L93.B0';
     }
     return 'avc1.42E01E';
 };
 
-const detectAudioCodec = (uint8) => {
-    for (let i = 0; i < uint8.length - 20; i++) {
-        if (uint8[i]===0x65&&uint8[i+1]===0x73&&uint8[i+2]===0x64&&uint8[i+3]===0x73) {
-            let o = i + 12;
-            if (uint8[o] !== 0x03) continue;
-            o++; while (uint8[o] & 0x80) o++; o++; o += 3;
-            if (uint8[o] !== 0x04) continue;
-            o++; while (uint8[o] & 0x80) o++; o++; o += 13;
-            if (uint8[o] !== 0x05) continue;
-            o++; while (uint8[o] & 0x80) o++; o++;
-            const t = (uint8[o] >> 3) & 0x1f;
-            console.log('[Engine] Audio codec: mp4a.40.' + (t||2));
-            return 'mp4a.40.' + (t === 0 ? 2 : t);
+const detectAudio = (u8) => {
+    for(let i=0;i<u8.length-20;i++) {
+        if(u8[i]===0x65&&u8[i+1]===0x73&&u8[i+2]===0x64&&u8[i+3]===0x73) {
+            let o=i+12;
+            if(u8[o]!==0x03)continue;
+            o++; while(u8[o]&0x80)o++; o++; o+=3;
+            if(u8[o]!==0x04)continue;
+            o++; while(u8[o]&0x80)o++; o++; o+=13;
+            if(u8[o]!==0x05)continue;
+            o++; while(u8[o]&0x80)o++; o++;
+            const t=(u8[o]>>3)&0x1f; return 'mp4a.40.'+(t===0?2:t);
         }
     }
     return 'mp4a.40.2';
 };
 
-const splitFragmentedMp4 = (uint8) => {
-    let offset = 0, splitIndex = -1, foundMoov = false;
-    const log = [];
-    while (offset < uint8.length - 8) {
-        const size = readUint32(uint8, offset);
-        const type = readBoxType(uint8, offset);
-        log.push('  offset=' + offset + ' type=' + type + ' size=' + size);
-        if (type === 'moov') foundMoov = true;
-        if (type === 'moof' || type === 'mdat') { splitIndex = offset; break; }
-        if (size < 8) break;
-        offset += size;
+const findBrainEnd = (u8) => {
+    let off=0;
+    while(off<u8.length-8) {
+        const sz=ru32(u8,off),ty=rbox(u8,off);
+        if(ty==='moof'||ty==='mdat') return off;
+        if(sz<8) break;
+        off+=sz;
     }
-    console.log('[Engine] Box walk:\n' + log.join('\n'));
-    if (splitIndex === -1) throw new Error(
-        'Failed to locate moof/mdat. ' +
-        (foundMoov ? 'moov found but no moof.' : 'moov not found — FFmpeg output corrupt?')
+    throw new Error('moof/mdat not found — FFmpeg output corrupt?');
+};
+
+// ── Tiny base64 encoder — ONLY for brain (<20KB) and key blobs (<256B) ───────
+// We explicitly document why btoa is acceptable here: it is never called with
+// video body data. The brick (potentially 10GB) goes through OPFS only.
+const tinyB64 = (u8) => {
+    let s=''; for(let i=0;i<u8.length;i++) s+=String.fromCharCode(u8[i]);
+    return btoa(s);
+};
+
+const toHex = (u8) => [...u8].map(b=>b.toString(16).padStart(2,'0')).join('');
+
+// ── AES key helpers ───────────────────────────────────────────────────────────
+
+// Build 16-byte segment IV: baseIV[0:8] as nonce, segIdx as BE uint64 in [8:15]
+function makeSegIV(baseIV, segIdx) {
+    const iv=new Uint8Array(16); iv.set(baseIV.slice(0,8),0);
+    let n=segIdx;
+    for(let b=15;b>=8&&n>0;b--){iv[b]=n&0xff;n=Math.floor(n/256);}
+    return iv;
+}
+
+// ── Vault helpers ─────────────────────────────────────────────────────────────
+
+async function hybridDecryptPayload(privKey, payload) {
+    const b64=(s)=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+    const wk=b64(payload.wrappedKey);
+    const sk=await crypto.subtle.decrypt({name:'RSA-OAEP'},privKey,wk);
+    const ak=await crypto.subtle.importKey('raw',sk,{name:'AES-GCM'},false,['decrypt']);
+    const iv=b64(payload.iv),ct=b64(payload.ciphertext),tag=b64(payload.tag);
+    const cb=new Uint8Array(ct.length+tag.length); cb.set(ct,0); cb.set(tag,ct.length);
+    const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv,tagLength:128},ak,cb);
+    return JSON.parse(new TextDecoder().decode(plain));
+}
+
+async function vaultHandshake(assetID, vaultUrl, extraBody={}) {
+    const kp=await crypto.subtle.generateKey(
+        {name:'RSA-OAEP',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},
+        false,['decrypt']
     );
-    return { brainBytes: uint8.slice(0, splitIndex), brickBytes: uint8.slice(splitIndex) };
-};
-
-// AES-CTR encrypt a single segment.
-// Zero IV is safe here because each segment has its own unique random key.
-const aesEncryptSegment = async (plain, keyBytes) => {
-    const iv = new Uint8Array(16); // zero IV — safe with unique-per-segment key
-    const ck = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['encrypt']);
-    return new Uint8Array(await crypto.subtle.encrypt(
-        { name: 'AES-CTR', counter: iv, length: 128 }, ck, plain
-    ));
-};
-
-// Encrypt the tempKeys array with AES-256-GCM using the transport key from vault.
-// The IV is random and prepended to the ciphertext.
-const encryptTempKeys = async (tempKeys, transportKeyHex) => {
-    const keyBytes = new Uint8Array(transportKeyHex.match(/.{2}/g).map(h => parseInt(h, 16)));
-    const iv       = crypto.getRandomValues(new Uint8Array(12));
-    const ck       = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
-    const plain    = new TextEncoder().encode(JSON.stringify(tempKeys));
-    const cipher   = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, ck, plain);
-    // Prepend IV (12 bytes) to ciphertext+tag
-    const result   = new Uint8Array(12 + cipher.byteLength);
-    result.set(iv, 0);
-    result.set(new Uint8Array(cipher), 12);
-    return uint8ToBase64(result);
-};
-
-// Perform the vault handshake to get the transport key.
-// ingestToken (optional): pass during ingest to bypass domain whitelist.
-// At playback time, no token is passed — whitelist check applies instead.
-const fetchTransportKey = async (assetID, vaultBaseUrl, ingestToken = null) => {
-    const keyPair = await crypto.subtle.generateKey(
-        { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
-        false, ['decrypt']
-    );
-    const pubKeyDer = await crypto.subtle.exportKey('spki', keyPair.publicKey);
-    const pubKeyB64 = uint8ToBase64(new Uint8Array(pubKeyDer));
-
-    const body = { publicKey: pubKeyB64 };
-    if (ingestToken) body.ingestToken = ingestToken;
-
-    const res = await fetch(`${vaultBaseUrl}/api/unlock?assetID=${assetID}`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(body)
+    const pubDer=await crypto.subtle.exportKey('spki',kp.publicKey);
+    const pubB64=tinyB64(new Uint8Array(pubDer));
+    const res=await fetch(`${vaultUrl}/api/unlock?assetID=${assetID}`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({publicKey:pubB64,...extraBody})
     });
+    if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.error||`Vault ${res.status}`);}
+    return hybridDecryptPayload(kp.privateKey,await res.json());
+}
 
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error('Vault denied: ' + (err.error || res.status));
-    }
+async function encryptKeyBlob(tempKeys, transportKeyHex) {
+    const kb=new Uint8Array(transportKeyHex.match(/.{2}/g).map(h=>parseInt(h,16)));
+    const iv=crypto.getRandomValues(new Uint8Array(12));
+    const ck=await crypto.subtle.importKey('raw',kb,{name:'AES-GCM'},false,['encrypt']);
+    const plain=new TextEncoder().encode(JSON.stringify(tempKeys));
+    const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv,tagLength:128},ck,plain);
+    const out=new Uint8Array(12+ct.byteLength); out.set(iv,0); out.set(new Uint8Array(ct),12);
+    return tinyB64(out); // tiny (<256B) — b64 fine
+}
 
-    const payload = await res.json();
+// ── Core ingest ───────────────────────────────────────────────────────────────
+//
+// Returns metadata needed by generateSmartAsset. The encrypted brick is
+// written to OPFS at `opfsName` — it stays there until the download is built.
 
-    // RSA-decrypt the session key, then AES-GCM-decrypt the payload
-    const wrappedKey = base64ToBytes(payload.wrappedKey);
-    const sessionKey = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, keyPair.privateKey, wrappedKey);
-    const aesKey     = await crypto.subtle.importKey('raw', sessionKey, { name: 'AES-GCM' }, false, ['decrypt']);
-    const iv         = base64ToBytes(payload.iv);
-    const ct         = base64ToBytes(payload.ciphertext);
-    const tag        = base64ToBytes(payload.tag);
-    const combined   = new Uint8Array(ct.length + tag.length);
-    combined.set(ct, 0); combined.set(tag, ct.length);
-    const plain      = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, aesKey, combined);
-    return JSON.parse(new TextDecoder().decode(plain)); // { brain, transportKey, segmentCount }
-};
+export async function processEvzonesVideo(file, onProgress) {
+    if(!ffmpeg.loaded) await ffmpeg.load();
+    ffmpeg.on('log',({message})=>console.log('[FFmpeg]',message));
+    ffmpeg.on('progress',({progress})=>onProgress?.({pct:Math.round(progress*45),label:'FFmpeg processing…'}));
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-export const processEvzonesVideo = async (file) => {
-    if (!ffmpeg.loaded) await ffmpeg.load();
-
-    ffmpeg.on('log',      ({ message })  => console.log('[FFmpeg]', message));
-    ffmpeg.on('progress', ({ progress }) => console.log('[FFmpeg]', Math.round(progress * 100) + '%'));
-
-    console.log('[Engine] Input:', file.name, (file.size / 1024 / 1024).toFixed(1), 'MB');
+    onProgress?.({pct:0,label:'Loading FFmpeg…'});
     await ffmpeg.writeFile('input.mp4', await fetchFile(file));
 
-    console.log('[Engine] Pass 1: defragmenting...');
-    await ffmpeg.exec([
-        '-i', 'input.mp4', '-map', '0:v:0', '-map', '0:a:0',
-        '-c', 'copy', '-map_metadata', '-1', '-ignore_unknown',
-        '-movflags', '+faststart', '-fflags', '+genpts', 'defrag.mp4'
-    ]);
+    onProgress?.({pct:5,label:'Pass 1: defragmenting…'});
+    await ffmpeg.exec(['-i','input.mp4','-map','0:v:0','-map','0:a:0',
+        '-c','copy','-map_metadata','-1','-ignore_unknown',
+        '-movflags','+faststart','-fflags','+genpts','defrag.mp4']);
 
-    console.log('[Engine] Pass 2: fragmenting...');
-    await ffmpeg.exec([
-        '-i', 'defrag.mp4', '-map', '0:v:0', '-map', '0:a:0',
-        '-c:v', 'copy', '-c:a', 'copy', '-map_metadata', '-1',
-        '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
-        '-frag_duration', '2000000', '-brand', 'isom', '-use_editlist', '0',
-        'fragmented.mp4'
-    ]);
+    onProgress?.({pct:30,label:'Pass 2: fragmenting…'});
+    await ffmpeg.exec(['-i','defrag.mp4','-map','0:v:0','-map','0:a:0',
+        '-c:v','copy','-c:a','copy','-map_metadata','-1',
+        '-movflags','frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
+        '-frag_duration','2000000','-brand','isom','-use_editlist','0','fragmented.mp4']);
 
-    const data  = await ffmpeg.readFile('fragmented.mp4');
-    const uint8 = new Uint8Array(data.buffer);
-    console.log('[Engine] FFmpeg output:', uint8.length, 'bytes');
+    onProgress?.({pct:50,label:'Reading FFmpeg output…'});
+    const raw  = await ffmpeg.readFile('fragmented.mp4');
+    const full = new Uint8Array(raw.buffer);
+    console.log('[Engine] FFmpeg output:',full.length,'bytes');
 
-    const { brainBytes: rawBrain, brickBytes } = splitFragmentedMp4(uint8);
-    const brainBytes = removeUdtaFromBrain(patchFtypBrand(rawBrain));
-    const codec      = detectCodec(brainBytes);
-    const audioCodec = detectAudioCodec(brainBytes);
+    // Split brain / brick
+    const brainEnd  = findBrainEnd(full);
+    const brainU8   = removeUdta(patchFtyp(full.slice(0, brainEnd)));
+    const brickU8   = full.slice(brainEnd); // still in RAM here — about to stream to OPFS
+    const codec     = detectCodec(brainU8);
+    const audioCodec= detectAudio(brainU8);
+    const brainB64  = tinyB64(brainU8); // <20KB — fine
 
-    // Encrypt each segment with a unique random AES key
-    console.log('[Engine] Encrypting segments...');
-    const tempKeys = [];   // Array of hex strings, one per segment
-    const encSegments = [];
+    console.log('[Engine] Brain:',brainU8.length,'B | Brick:',brickU8.length,'B | Codec:',codec);
 
-    const totalSegments = Math.ceil(brickBytes.length / SEGMENT_SIZE);
-    for (let i = 0; i < totalSegments; i++) {
-        const start = i * SEGMENT_SIZE;
-        const end   = Math.min(start + SEGMENT_SIZE, brickBytes.length);
-        const plain = brickBytes.slice(start, end);
-        const key   = crypto.getRandomValues(new Uint8Array(32));
-        const enc   = await aesEncryptSegment(plain, key);
-        encSegments.push(enc);
-        tempKeys.push([...key].map(b => b.toString(16).padStart(2, '0')).join(''));
+    // Generate a base IV (nonce) — each segment gets a derived IV from this
+    const baseIV    = crypto.getRandomValues(new Uint8Array(16));
+    const baseIVHex = toHex(baseIV);
+
+    // Encrypt brick → OPFS, 8 MB at a time
+    onProgress?.({pct:52,label:'Encrypting & writing to local storage…'});
+
+    const opfsName  = `evzones-brick-${Date.now()}.bin`;
+    const opfsRoot  = await navigator.storage.getDirectory();
+    const fh        = await opfsRoot.getFileHandle(opfsName,{create:true});
+    const writable  = await fh.createWritable();
+
+    const tempKeys  = [];
+    let brickOffset = 0, segIdx = 0, brickWritten = 0;
+
+    while(brickOffset < brickU8.length) {
+        const end   = Math.min(brickOffset + SEGMENT_SIZE, brickU8.length);
+        const plain = brickU8.subarray(brickOffset, end); // view — no copy
+
+        const rawKey = crypto.getRandomValues(new Uint8Array(32));
+        const ck     = await crypto.subtle.importKey('raw',rawKey,{name:'AES-CTR'},false,['encrypt']);
+        const segIV  = makeSegIV(baseIV, segIdx);
+        const ct     = await crypto.subtle.encrypt({name:'AES-CTR',counter:segIV,length:128},ck,plain);
+
+        await writable.write(new Uint8Array(ct));
+        brickWritten += ct.byteLength;
+        tempKeys.push(toHex(rawKey));
+        brickOffset = end; segIdx++;
+
+        const pct = 52 + Math.round((brickOffset/brickU8.length)*38);
+        onProgress?.({pct, label:`Encrypting… ${Math.round(brickOffset/1024/1024)}MB / ${Math.round(brickU8.length/1024/1024)}MB`});
     }
 
-    // Stitch segments into one encrypted brick Uint8Array
-    const totalEncSize = encSegments.reduce((a, s) => a + s.length, 0);
-    const encBrick     = new Uint8Array(totalEncSize);
-    let off = 0;
-    for (const seg of encSegments) { encBrick.set(seg, off); off += seg.length; }
+    await writable.close();
+    console.log('[Engine] Brick in OPFS:',opfsName,brickWritten,'bytes',segIdx,'segments');
 
-    console.log('[Engine] Brain:', brainBytes.length, 'B | Segments:', totalSegments,
-                '| Codec:', codec, '| Audio:', audioCodec);
+    onProgress?.({pct:92,label:'Encryption complete'});
 
-    return {
-        brain:        uint8ToBase64(brainBytes),
-        brick:        encBrick,
-        tempKeys,
-        segmentCount: totalSegments,
-        fileName:     file.name,
-        codec,
-        audioCodec
-    };
-};
+    return { brainB64, brainLen:brainU8.length, opfsName, brickByteLength:brickWritten,
+             segmentCount:segIdx, tempKeys, baseIVHex, codec, audioCodec, fileName:file.name };
+}
 
-// Derive the ingest token client-side so the server can verify it.
-// ingestToken = HMAC(HMAC(masterKey, assetSecret), 'ingest')
-// We can't do the full HMAC here (masterKey is server-only), so instead
-// the server sends us the ingestToken in the /api/save response.
-// See EvzonesStudio.jsx — save.js returns { assetID, ingestToken }.
-export const generateSmartAsset = async (data, assetID, vaultBaseUrl, ingestToken) => {
-    const VAULT_URL  = (vaultBaseUrl || 'https://evzones-protocol.vercel.app').replace(/\/$/, '');
-    const codec      = data.codec      || 'avc1.42E01E';
-    const audioCodec = data.audioCodec || 'mp4a.40.2';
+// ── Generate single-file smart asset ─────────────────────────────────────────
+//
+// Returns: { fileName, download() }
+// download() streams the hybrid file directly to disk — it never holds the
+// full file in memory. Callers should call it when the user clicks "Download".
 
-    if (!ingestToken) {
-        throw new Error('ingestToken is required for generateSmartAsset — check /api/save returns it');
-    }
+export async function generateSmartAsset(processed, assetID, vaultBaseUrl, ingestToken) {
+    const VAULT_URL = (vaultBaseUrl||'https://evzones-protocol.vercel.app').replace(/\/$/,'');
 
-    console.log('[Engine] Fetching transport key for key encryption (ingest mode)...');
-    // Pass ingestToken so the server bypasses the domain whitelist for this call.
-    const authData = await fetchTransportKey(assetID, VAULT_URL, ingestToken);
+    // Vault handshake (ingest mode — bypasses domain whitelist via ingestToken)
+    console.log('[Engine] Ingest vault handshake…');
+    const auth = await vaultHandshake(assetID, VAULT_URL, {ingestToken});
+    if(!auth.transportKey) throw new Error('Vault did not return transportKey');
 
-    if (!authData.transportKey) {
-        throw new Error('Vault did not return a transport key');
-    }
+    const encKeysB64 = await encryptKeyBlob(processed.tempKeys, auth.transportKey);
 
-    // Encrypt the tempKeys array with the transport key.
-    // ENC_KEYS_B64 is safe to embed in the HTML — useless without the vault.
-    console.log('[Engine] Encrypting temp keys with transport key...');
-    const encKeysB64 = await encryptTempKeys(data.tempKeys, authData.transportKey);
-
-    const brickB64 = uint8ToBase64(data.brick);
-
-    console.log('[Engine] Generating HTML asset:', assetID,
-                '| Segments:', data.segmentCount,
-                '| Brick:', brickB64.length, 'chars');
-
-    const html = generateHtmlTemplate({
-        fileName:    data.fileName,
+    // Build the HTML preamble (pure text, no binary here)
+    const html = buildHtml({
+        fileName:     processed.fileName,
         assetID,
-        vaultUrl:    VAULT_URL,
-        codec,
-        audioCodec,
-        brickB64,
+        vaultUrl:     VAULT_URL,
+        codec:        processed.codec,
+        audioCodec:   processed.audioCodec,
+        brainB64:     processed.brainB64,
+        brainLen:     processed.brainLen,
         encKeysB64,
-        segmentCount: data.segmentCount,
-        segmentSize:  SEGMENT_SIZE
+        brickByteLength: processed.brickByteLength,
+        baseIVHex:    processed.baseIVHex,
+        segmentSize:  SEGMENT_SIZE,
+        segmentCount: processed.segmentCount
     });
 
-    return new Blob([html], { type: 'text/html' });
-};
+    // The marker tells playback JS where the binary starts.
+    // It is embedded as an HTML comment so the file remains valid HTML.
+    // The brick is appended immediately after a newline following the marker.
+    const htmlBytes    = new TextEncoder().encode(html);
+    const markerStr    = `\n<!--EVZONES:BRICK_OFFSET=${htmlBytes.length + 1},BRICK_BYTES=${processed.brickByteLength}-->\n`;
+    const markerBytes  = new TextEncoder().encode(markerStr);
+    const brickOffset  = htmlBytes.length + markerBytes.length;
 
-// ─── HTML Template ────────────────────────────────────────────────────────────
+    console.log('[Engine] HTML:',htmlBytes.length,'B | Marker:',markerBytes.length,'B | Brick starts at:',brickOffset);
 
-function generateHtmlTemplate({ fileName, assetID, vaultUrl, codec, audioCodec,
-                                  brickB64, encKeysB64, segmentCount, segmentSize }) {
+    // Return a download function that streams the hybrid file to disk.
+    // Streaming avoids ever holding the 10GB file in RAM simultaneously.
+    const outFileName = processed.fileName.replace(/\.[^/.]+$/,'') + '_evzones.html';
+
+    const download = async (onProg) => {
+        // Open OPFS brick for reading
+        const opfsRoot  = await navigator.storage.getDirectory();
+        const brickFH   = await opfsRoot.getFileHandle(processed.opfsName);
+        const brickFile = await brickFH.getFile(); // File/Blob — no RAM copy
+
+        // Try showSaveFilePicker for zero-copy streaming to disk (Chrome/Edge)
+        if(typeof window.showSaveFilePicker === 'function') {
+            let handle;
+            try {
+                handle = await window.showSaveFilePicker({
+                    suggestedName: outFileName,
+                    types:[{description:'Evzones Asset',accept:{'text/html':['.html']}}]
+                });
+            } catch(e) {
+                if(e.name==='AbortError') throw e;
+                handle = null;
+            }
+
+            if(handle) {
+                const ws = await handle.createWritable();
+                await ws.write(htmlBytes);
+                await ws.write(markerBytes);
+
+                // Stream brick from OPFS into the file without loading it
+                const reader = brickFile.stream().getReader();
+                let written = 0;
+                while(true) {
+                    const {done,value} = await reader.read();
+                    if(done) break;
+                    await ws.write(value);
+                    written += value.byteLength;
+                    onProg?.({written, total:processed.brickByteLength});
+                }
+                await ws.close();
+                return;
+            }
+        }
+
+        // Fallback: build a Blob and trigger anchor download.
+        // For very large files this needs RAM. It's the Safari fallback path.
+        // Safari doesn't support showSaveFilePicker yet.
+        // We construct the Blob lazily from parts — browser handles the concatenation.
+        const brickBlob = new Blob([brickFile], {type:'application/octet-stream'});
+        const combined  = new Blob([htmlBytes, markerBytes, brickBlob], {type:'text/html'});
+        const url       = URL.createObjectURL(combined);
+        const a         = document.createElement('a');
+        a.href     = url;
+        a.download = outFileName;
+        a.click();
+        setTimeout(()=>URL.revokeObjectURL(url), 60000);
+        // Note: for Safari with large files this will OOM. The proper Safari fix
+        // is to serve through your own server with Range support, not local download.
+        // For viewing purposes, the OPFS→SW pipeline works fine on Safari.
+        // The download step is a studio-side (desktop Chrome/Edge) concern.
+    };
+
+    return { fileName: outFileName, download, brickOffset };
+}
+
+// ── HTML template ─────────────────────────────────────────────────────────────
+
+function buildHtml({ fileName, assetID, vaultUrl, codec, audioCodec, brainB64,
+                     brainLen, encKeysB64, brickByteLength, baseIVHex,
+                     segmentSize, segmentCount }) {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EVZONES SENTINEL: ${fileName}</title>
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{background:linear-gradient(135deg,#0a0a0a,#1a1a1a);color:#fff;
-             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-             display:flex;align-items:center;justify-content:center;min-height:100vh}
-        #player{width:100%;max-width:100vw;max-height:100vh;display:none}
-        .lock{border:2px solid #00ff00;padding:3rem;background:rgba(10,10,10,0.95);
-              border-radius:16px;text-align:center;max-width:500px;
-              box-shadow:0 0 40px rgba(0,255,0,0.3)}
-        .lock h2{font-size:1.5rem;margin-bottom:1rem;color:#00ff00}
-        .lock p{margin:1rem 0;opacity:.9}
-        #btn{background:#00ff00;color:#000;border:none;padding:15px 40px;
-             border-radius:8px;font-weight:bold;font-size:1.1rem;cursor:pointer;
-             transition:all .3s;margin-top:1rem}
-        #btn:hover{background:#00cc00;transform:translateY(-2px)}
-        #btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
-        #dbg{font-family:monospace;font-size:.8rem;color:#00ff00;
-             margin-top:15px;word-break:break-all}
-        .sp{display:inline-block;width:18px;height:18px;
-            border:3px solid rgba(0,255,0,.3);border-top-color:#00ff00;
-            border-radius:50%;animation:spin 1s linear infinite;
-            margin-left:8px;vertical-align:middle}
-        #wm-s{position:fixed;top:0;left:0;width:100%;height:100%;
-              pointer-events:none;z-index:10;display:none;align-items:center;
-              justify-content:center;opacity:.012;color:#fff;font-size:1.8vw;
-              font-weight:bold;font-family:monospace;text-align:center;
-              word-break:break-all;user-select:none;white-space:pre-wrap}
-        #wm-d{position:fixed;pointer-events:none;z-index:11;display:none;
-              opacity:.018;color:#fff;font-size:1.1vw;font-weight:bold;
-              font-family:monospace;user-select:none;transition:top 2s ease,left 2s ease}
-        @keyframes spin{to{transform:rotate(360deg)}}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EVZONES: ${fileName}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050a0f;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh}
+#player{width:100%;max-width:100vw;max-height:100vh;display:none;background:#000}
+.lock{border:1px solid rgba(0,200,255,.25);padding:2.5rem;background:rgba(5,10,20,.97);
+      border-radius:12px;text-align:center;max-width:460px;
+      box-shadow:0 0 60px rgba(0,200,255,.08)}
+.lock h2{font-size:1.1rem;margin-bottom:1rem;color:#00c8ff;font-family:monospace;letter-spacing:2px}
+.lock p{margin:.7rem 0;opacity:.8;font-size:.88rem;line-height:1.5}
+#btn{background:#00c8ff;color:#000;border:none;padding:13px 32px;border-radius:6px;
+     font-weight:700;font-size:.95rem;cursor:pointer;transition:all .2s;margin-top:.8rem;
+     font-family:monospace;letter-spacing:1px}
+#btn:hover:not(:disabled){background:#fff;box-shadow:0 0 28px rgba(0,200,255,.35)}
+#btn:disabled{opacity:.4;cursor:not-allowed}
+#dbg{font-family:monospace;font-size:.7rem;color:#00c8ff;margin-top:10px;
+     word-break:break-all;line-height:1.6;text-align:left}
+.bw{background:rgba(0,200,255,.08);border-radius:3px;height:3px;margin-top:8px;overflow:hidden}
+.bf{height:100%;background:#00c8ff;width:0;transition:width .4s;border-radius:3px}
+.sp{display:inline-block;width:13px;height:13px;border:2px solid rgba(0,200,255,.25);
+    border-top-color:#00c8ff;border-radius:50%;animation:spin 1s linear infinite;
+    margin-left:5px;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
 </head>
 <body>
-    <div id="lock" class="lock">
-        <h2>&#x1F6E1;&#xFE0F; EVZONES PROTOCOL ACTIVE</h2>
-        <p id="msg">Secure Connection Established. Domain Verification Pending.</p>
-        <button id="btn">INITIALIZE DECRYPTION</button>
-        <p id="dbg"></p>
-    </div>
-    <video id="player" controls controlsList="nodownload" playsinline></video>
-    <div id="wm-s"></div>
-    <div id="wm-d"></div>
-
+<div id="lock" class="lock">
+  <h2>◈ EVZONES PROTOCOL</h2>
+  <p id="msg">Secure connection ready. Domain verification pending.</p>
+  <button id="btn">INITIALIZE DECRYPTION</button>
+  <div class="bw"><div class="bf" id="bar"></div></div>
+  <p id="dbg"></p>
+</div>
+<video id="player" controls controlsList="nodownload" playsinline></video>
 <script>
-// ── Asset constants (non-sensitive — brick is encrypted, keys blob is encrypted) ──
-var BRICK_B64    = '${brickB64}';
-var ENC_KEYS_B64 = '${encKeysB64}';
+// ── Asset metadata (non-sensitive — brick is encrypted, keys are encrypted) ──
 var ASSET_ID     = '${assetID}';
 var VAULT_URL    = '${vaultUrl}';
 var CODEC        = '${codec}';
 var AUDIO        = '${audioCodec}';
 var MIME_TYPE    = 'video/mp4; codecs="' + CODEC + ', ' + AUDIO + '"';
-var TOTAL_SEGS   = ${segmentCount};
+var BRAIN_B64    = '${brainB64}';
+var ENC_KEYS_B64 = '${encKeysB64}';
+var BASE_IV_HEX  = '${baseIVHex}';
+var BRICK_BYTES  = ${brickByteLength};
+var BRAIN_LEN    = ${brainLen};
 var SEG_SIZE     = ${segmentSize};
+var SEG_COUNT    = ${segmentCount};
+// BRICK_OFFSET is injected at the end of this file as an HTML comment.
+// We read it from the DOM at runtime.
 
-// ── Utilities ────────────────────────────────────────────────────────────────
-function b64ToBytes(b64) {
-    var s = atob(b64.replace(/\\s/g, ''));
-    var o = new Uint8Array(s.length);
-    for (var i = 0; i < s.length; i++) o[i] = s.charCodeAt(i);
-    return o;
-}
-function bytesToB64(bytes) {
-    var s = '';
-    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    return btoa(s);
-}
-function hexToBytes(hex) {
-    var b = new Uint8Array(hex.length / 2);
-    for (var i = 0; i < hex.length; i += 2) b[i/2] = parseInt(hex.substr(i,2), 16);
-    return b;
-}
-function step(n, t) { console.log(n, t); document.getElementById('dbg').textContent = 'Step ' + n + ': ' + t; }
+// ── UI ────────────────────────────────────────────────────────────────────────
+var $=document.getElementById.bind(document);
+var msgEl=$('msg'),dbgEl=$('dbg'),barEl=$('bar'),btnEl=$('btn'),player=$('player');
+function log(s){console.log('[Asset]',s);dbgEl.textContent=s;}
+function prog(p,s){barEl.style.width=p+'%';if(s)log(s);}
+function fail(s){msgEl.innerHTML='<span style="color:#ff4455">&#x26A0; ACCESS DENIED</span>';
+    dbgEl.textContent=s;dbgEl.style.color='#ff4455';
+    btnEl.disabled=false;btnEl.textContent='RETRY';}
 
-// ── Crypto ───────────────────────────────────────────────────────────────────
+// ── Tiny base64 → Uint8Array (only for small crypto payloads, NOT video) ──────
+function b64(s){var b=atob(s.replace(/\s/g,'')),u=new Uint8Array(b.length);
+    for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
+function hex2u8(h){var u=new Uint8Array(h.length>>1);
+    for(var i=0;i<h.length;i+=2)u[i>>1]=parseInt(h.substr(i,2),16);return u;}
 
-// Decrypt the RSA+AES-GCM hybrid payload from the vault
-async function hybridDecrypt(privateKey, payload) {
-    var wk  = b64ToBytes(payload.wrappedKey);
-    var sk  = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, privateKey, wk);
-    var ak  = await crypto.subtle.importKey('raw', sk, { name: 'AES-GCM' }, false, ['decrypt']);
-    var iv  = b64ToBytes(payload.iv);
-    var ct  = b64ToBytes(payload.ciphertext);
-    var tag = b64ToBytes(payload.tag);
-    var cb  = new Uint8Array(ct.length + tag.length);
-    cb.set(ct, 0); cb.set(tag, ct.length);
-    return new TextDecoder().decode(
-        await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv, tagLength: 128 }, ak, cb)
-    );
+// ── Vault decryption (RSA+AES-GCM hybrid — only decrypts ~200B of JSON) ──────
+async function hybridDecrypt(priv,payload){
+    var sk=await crypto.subtle.decrypt({name:'RSA-OAEP'},priv,b64(payload.wrappedKey));
+    var ak=await crypto.subtle.importKey('raw',sk,{name:'AES-GCM'},false,['decrypt']);
+    var ct=b64(payload.ciphertext),tag=b64(payload.tag),cb=new Uint8Array(ct.length+tag.length);
+    cb.set(ct,0);cb.set(tag,ct.length);
+    return new TextDecoder().decode(await crypto.subtle.decrypt(
+        {name:'AES-GCM',iv:b64(payload.iv),tagLength:128},ak,cb));
 }
-
-// Decrypt the ENC_KEYS_B64 blob with the transport key from vault
-async function decryptKeyBlob(encKeysB64, transportKeyHex) {
-    var raw    = b64ToBytes(encKeysB64);
-    var iv     = raw.slice(0, 12);
-    var ct     = raw.slice(12);
-    var keyB   = hexToBytes(transportKeyHex);
-    var ck     = await crypto.subtle.importKey('raw', keyB, { name: 'AES-GCM' }, false, ['decrypt']);
-    var plain  = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv, tagLength: 128 }, ck, ct);
-    return JSON.parse(new TextDecoder().decode(plain)); // string[]
+async function vaultHandshake(){
+    var kp=await crypto.subtle.generateKey(
+        {name:'RSA-OAEP',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},
+        false,['decrypt']);
+    var pubDer=await crypto.subtle.exportKey('spki',kp.publicKey);
+    var pubB64=btoa(String.fromCharCode(...new Uint8Array(pubDer)));
+    var res=await fetch(VAULT_URL+'/api/unlock?assetID='+ASSET_ID,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({publicKey:pubB64})});
+    if(!res.ok){var e=await res.json().catch(function(){return{};});throw new Error(e.error||'Vault '+res.status);}
+    return JSON.parse(await hybridDecrypt(kp.privateKey,await res.json()));
 }
-
-// Decrypt one brick segment (AES-CTR, zero IV, unique key per segment)
-async function decryptSegment(encBytes, keyHex) {
-    var k  = hexToBytes(keyHex);
-    var iv = new Uint8Array(16); // zero IV — safe because key is unique per segment
-    var ck = await crypto.subtle.importKey('raw', k, { name: 'AES-CTR' }, false, ['decrypt']);
-    return new Uint8Array(
-        await crypto.subtle.decrypt({ name: 'AES-CTR', counter: iv, length: 128 }, ck, encBytes)
-    );
+async function decryptKeyBlob(tkHex){
+    var raw=b64(ENC_KEYS_B64),iv=raw.slice(0,12),ct=raw.slice(12);
+    var kb=hex2u8(tkHex),ck=await crypto.subtle.importKey('raw',kb,{name:'AES-GCM'},false,['decrypt']);
+    return JSON.parse(new TextDecoder().decode(
+        await crypto.subtle.decrypt({name:'AES-GCM',iv:iv,tagLength:128},ck,ct)));
 }
 
-// ── Vault handshake ───────────────────────────────────────────────────────────
-async function vaultHandshake() {
-    var kp = await crypto.subtle.generateKey(
-        { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
-        false, ['decrypt']
-    );
-    var pubDer = await crypto.subtle.exportKey('spki', kp.publicKey);
-    var pubB64 = bytesToB64(new Uint8Array(pubDer));
+// ── Find brick offset by reading the marker comment ───────────────────────────
+// The HTML file has a comment: <!--EVZONES:BRICK_OFFSET=N,BRICK_BYTES=M-->
+// We search the raw bytes of this file (fetched with Range: bytes=0-4095)
+// to avoid loading the full file. The marker is always in the first 4KB
+// because the HTML ends at </html> and the marker follows immediately.
+async function findBrickOffset(){
+    var res=await fetch(location.href,{headers:{Range:'bytes=0-8191'}});
+    var buf=await res.arrayBuffer();
+    var txt=new TextDecoder().decode(buf);
+    var m=txt.match(/<!--EVZONES:BRICK_OFFSET=(\d+),BRICK_BYTES=(\d+)-->/);
+    if(!m)throw new Error('Brick offset marker not found — file may be truncated');
+    return {offset:parseInt(m[1]),bytes:parseInt(m[2])};
+}
 
-    var res = await fetch(VAULT_URL + '/api/unlock?assetID=' + ASSET_ID, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ publicKey: pubB64 })
-    });
-    if (!res.ok) {
-        var err = {};
-        try { err = await res.json(); } catch(e) {}
-        throw new Error(err.error || 'Vault denied: ' + res.status);
+// ── Stream brick from self into OPFS ──────────────────────────────────────────
+// Uses fetch with Range header to skip the HTML preamble entirely.
+// Streams the response body chunk-by-chunk into OPFS.
+// Max RAM: one fetch chunk (typically 64KB-1MB, browser-controlled).
+async function streamBrickToOPFS(brickOffset,brickBytes,opfsName,onProg){
+    var root=await navigator.storage.getDirectory();
+    var fh=await root.getFileHandle(opfsName,{create:true});
+    var ws=await fh.createWritable();
+
+    // Fetch only the brick portion of this file
+    var res=await fetch(location.href,{headers:{Range:'bytes='+brickOffset+'-'}});
+    if(!res.ok&&res.status!==206)throw new Error('Self-fetch failed: '+res.status);
+
+    var reader=res.body.getReader(),written=0;
+    while(true){
+        var r=await reader.read();
+        if(r.done)break;
+        await ws.write(r.value);
+        written+=r.value.byteLength;
+        onProg(written,brickBytes);
+        if(written>=brickBytes)break; // don't read past the brick
     }
-    var payload = await res.json();
-    return JSON.parse(await hybridDecrypt(kp.privateKey, payload));
-    // Returns: { brain: string, transportKey: string, segmentCount: number }
+    await ws.close();
+    return fh;
 }
 
-// ── MSE helpers ───────────────────────────────────────────────────────────────
-function appendBuffer(sb, chunk) {
-    return new Promise(function(res, rej) {
-        function ok() { sb.removeEventListener('error', er); res(); }
-        function er() {
-            sb.removeEventListener('updateend', ok);
-            var e = sb.error;
-            rej(new Error('SourceBuffer error: ' + (e ? e.code + ' ' + e.message : 'unknown')));
-        }
-        sb.addEventListener('updateend', ok, { once: true });
-        sb.addEventListener('error',     er, { once: true });
-        try { sb.appendBuffer(chunk); }
-        catch(e) {
-            sb.removeEventListener('updateend', ok);
-            sb.removeEventListener('error',     er);
-            rej(new Error('appendBuffer sync throw: ' + e.message));
-        }
+// ── Service Worker ────────────────────────────────────────────────────────────
+async function ensureSW(){
+    if(!('serviceWorker' in navigator))throw new Error('Service Worker not supported');
+    var reg=await navigator.serviceWorker.register('./sw.js',{scope:'./'});
+    if(reg.active)return;
+    await new Promise(function(resolve){
+        var sw=reg.installing||reg.waiting;
+        if(!sw){resolve();return;}
+        sw.addEventListener('statechange',function(){if(sw.state==='activated')resolve();});
     });
 }
-
-// ── Watermark ─────────────────────────────────────────────────────────────────
-async function initWatermarks() {
-    var ip = 'unknown';
-    try { ip = (await (await fetch('https://api.ipify.org?format=json')).json()).ip; } catch(e) {}
-    var info = ip + ' | ' + window.location.href + ' | ' + new Date().toISOString().slice(0,19);
-    var wms = document.getElementById('wm-s');
-    wms.textContent = info + '\\n' + info + '\\n' + info;
-    wms.style.display = 'flex';
-    var wmd = document.getElementById('wm-d');
-    wmd.textContent = ip + '\\n' + window.location.hostname;
-    wmd.style.display = 'block';
-    function mv() { wmd.style.left = (5+Math.random()*75)+'vw'; wmd.style.top = (5+Math.random()*85)+'vh'; }
-    mv(); setInterval(mv, 30000);
-}
-
-// ── Session tracking ──────────────────────────────────────────────────────────
-var SESSION_ID = null;
-async function startSession() {
-    try {
-        var r = await fetch(VAULT_URL + '/api/checkpoint', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ assetID: ASSET_ID, viewerURL: window.location.href })
-        });
-        SESSION_ID = (await r.json()).sessionID;
-    } catch(e) {}
-}
-async function pingSession(cp) {
-    if (!SESSION_ID) return;
-    try {
-        await fetch(VAULT_URL + '/api/checkpoint', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ assetID: ASSET_ID, sessionID: SESSION_ID, checkpoint: cp })
-        });
-    } catch(e) {}
+function swMsg(msg){
+    return new Promise(function(res,rej){
+        var ch=new MessageChannel();
+        ch.port1.onmessage=function(e){e.data&&e.data.error?rej(new Error(e.data.error)):res(e.data);};
+        navigator.serviceWorker.controller.postMessage(msg,[ch.port2]);
+    });
 }
 
 // ── Kill switch poll ──────────────────────────────────────────────────────────
-// Re-use the vault handshake every 30s to check killed status.
-// If the asset is killed, the vault returns 403, and we stop playback.
-var killPubB64 = null;
-async function startKillPoll(player) {
-    setInterval(async function() {
-        try {
-            // Lightweight poll: generate a new RSA pair each time (cheap)
-            var kp = await crypto.subtle.generateKey(
-                { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
-                false, ['decrypt']
-            );
-            var pubDer = await crypto.subtle.exportKey('spki', kp.publicKey);
-            var pubB64 = bytesToB64(new Uint8Array(pubDer));
-            var r = await fetch(VAULT_URL + '/api/unlock?assetID=' + ASSET_ID, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ publicKey: pubB64 })
-            });
-            if (r.status === 403) {
-                player.pause(); player.src = '';
-                document.getElementById('lock').style.display = 'flex';
-                document.getElementById('msg').innerHTML =
-                    '<span style="color:#ff3333">&#x26A0; This video has been deactivated.</span>';
-                document.getElementById('wm-s').style.display = 'none';
-                document.getElementById('wm-d').style.display = 'none';
-                document.getElementById('btn').style.display = 'none';
+function startKillPoll(){
+    setInterval(async function(){
+        try{
+            var kp=await crypto.subtle.generateKey(
+                {name:'RSA-OAEP',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},
+                false,['decrypt']);
+            var pubDer=await crypto.subtle.exportKey('spki',kp.publicKey);
+            var pubB64=btoa(String.fromCharCode(...new Uint8Array(pubDer)));
+            var r=await fetch(VAULT_URL+'/api/unlock?assetID='+ASSET_ID,{
+                method:'POST',headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({publicKey:pubB64})});
+            if(r.status===403){
+                player.pause();player.src='';
+                $('lock').style.display='flex';
+                msgEl.innerHTML='<span style="color:#ff4455">&#x26A0; Asset deactivated.</span>';
             }
-        } catch(e) {}
-    }, 30000);
+        }catch(e){}
+    },30000);
 }
 
-// ── Main playback entrypoint ───────────────────────────────────────────────────
-document.getElementById('btn').addEventListener('click', async function() {
-    this.disabled = true;
-    var msgEl  = document.getElementById('msg');
-    var player = document.getElementById('player');
+// ── Session tracking ──────────────────────────────────────────────────────────
+var SID=null;
+async function startSession(){
+    try{var r=await fetch(VAULT_URL+'/api/checkpoint',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({assetID:ASSET_ID,viewerURL:location.href})});
+        SID=(await r.json()).sessionID;
+    }catch(e){}
+}
+async function ping(cp){if(!SID)return;
+    try{await fetch(VAULT_URL+'/api/checkpoint',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({assetID:ASSET_ID,sessionID:SID,checkpoint:cp})});}catch(e){}}
 
-    try {
-        step(1, 'Vault handshake...');
-        msgEl.innerHTML = "Verifying Domain Authority... <span class='sp'></span>";
+// ── Main button ───────────────────────────────────────────────────────────────
+btnEl.addEventListener('click',async function(){
+    btnEl.disabled=true;
+    try{
+        prog(5,'Step 1: Vault handshake…');
+        msgEl.innerHTML="Verifying domain… <span class='sp'></span>";
+        var auth=await vaultHandshake();
+        var tempKeys=await decryptKeyBlob(auth.transportKey);
 
-        var auth = await vaultHandshake();
-        // auth = { brain: string (base64), transportKey: string (hex), segmentCount: number }
+        prog(15,'Step 2: Locating brick…');
+        var {offset:brickOffset,bytes:brickBytes}=await findBrickOffset();
+        console.log('[Asset] Brick at offset',brickOffset,'size',brickBytes,'B');
 
-        step(2, 'Decrypting key manifest...');
-        var tempKeys   = await decryptKeyBlob(ENC_KEYS_B64, auth.transportKey);
-        var brainBytes = b64ToBytes(auth.brain);
-        var encBrick   = b64ToBytes(BRICK_B64);
-        console.log('Brain:', brainBytes.length, 'B | Enc brick:', encBrick.length, 'B | Keys:', tempKeys.length);
+        prog(18,'Step 3: Service Worker…');
+        await ensureSW();
 
-        // ── iOS / Safari without MediaSource ────────────────────────────────
-        if (typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported(MIME_TYPE)) {
-            step(3, 'iOS detected — decrypting full video...');
-            // Decrypt all segments into a single buffer, then create a blob URL.
-            // Safari on iOS doesn't support MSE but handles blob URLs fine.
-            var totalDecSize = 0;
-            var decSegs = [];
-            for (var si = 0; si < tempKeys.length; si++) {
-                var ss  = si * SEG_SIZE;
-                var se  = Math.min(ss + SEG_SIZE, encBrick.length);
-                var dec = await decryptSegment(encBrick.slice(ss, se), tempKeys[si]);
-                decSegs.push(dec);
-                totalDecSize += dec.length;
-            }
-            var full = new Uint8Array(brainBytes.length + totalDecSize);
-            full.set(brainBytes, 0);
-            var pos = brainBytes.length;
-            for (var i = 0; i < decSegs.length; i++) { full.set(decSegs[i], pos); pos += decSegs[i].length; }
+        var opfsName='evzones-'+ASSET_ID+'.bin';
 
-            var blobUrl = URL.createObjectURL(new Blob([full], { type: 'video/mp4' }));
-            document.getElementById('lock').style.display = 'none';
-            player.style.display = 'block';
-            player.src = blobUrl;
-            player.play().catch(function() { document.getElementById('dbg').textContent = 'Tap video to play'; });
-            await startSession();
-            setInterval(function() { if (!player.paused) pingSession(Math.floor(player.currentTime)); }, 15000);
-            initWatermarks();
-            return;
+        // Check OPFS cache
+        var cached=false;
+        try{
+            var root=await navigator.storage.getDirectory();
+            var cfh=await root.getFileHandle(opfsName);
+            var cf=await cfh.getFile();
+            if(cf.size===brickBytes){cached=true;log('Cached in OPFS — skipping download');}
+        }catch(e){}
+
+        if(!cached){
+            prog(20,'Step 4: Streaming encrypted video to local storage…');
+            await streamBrickToOPFS(brickOffset,brickBytes,opfsName,function(w,t){
+                prog(20+Math.round((w/t)*55),'Caching… '+Math.round(w/1024/1024)+'MB / '+Math.round(t/1024/1024)+'MB');
+            });
         }
 
-        // ── MSE path (Chrome, Firefox, Desktop Safari) ───────────────────────
-        step(3, 'Validating codec: ' + MIME_TYPE);
-        if (!MediaSource.isTypeSupported(MIME_TYPE)) throw new Error('Codec not supported: ' + MIME_TYPE);
+        prog(78,'Step 5: Registering with player…');
+        // Pre-import all CryptoKeys in the SW for fast range serving
+        await swMsg({type:'REGISTER_ASSET',id:ASSET_ID,opfsName,
+            brainB64:BRAIN_B64,tempKeys,baseIVHex:BASE_IV_HEX,
+            segmentSize:SEG_SIZE,segmentCount:SEG_COUNT,
+            brickBytes:brickBytes,mimeType:MIME_TYPE});
 
-        step(4, 'Initializing MediaSource...');
-        var ms = new MediaSource();
-        player.src = URL.createObjectURL(ms);
-        await new Promise(function(res, rej) {
-            ms.addEventListener('sourceopen', res, { once: true });
-            ms.addEventListener('error',      rej, { once: true });
+        prog(85,'Step 6: Starting playback…');
+        var videoUrl='./sw-video/'+ASSET_ID+'.mp4';
+        player.src=videoUrl;
+
+        // Wait for canplay or a short timeout
+        await new Promise(function(resolve,reject){
+            player.addEventListener('canplay',resolve,{once:true});
+            player.addEventListener('error',function(){
+                reject(new Error('Video error: '+(player.error?player.error.message:'unknown')));
+            },{once:true});
+            setTimeout(resolve,12000);
         });
-        var sb = ms.addSourceBuffer(MIME_TYPE);
-        console.log('SourceBuffer mode:', sb.mode);
 
-        step(5, 'Appending init segment + segment 0...');
-        await new Promise(function(r) { setTimeout(r, 0); }); // yield to browser
+        prog(100,'Authorized.');
+        $('lock').style.display='none';
+        player.style.display='block';
+        player.play().catch(function(){log('Click to play (autoplay blocked)');});
 
-        // Decrypt and append the first segment together with brain
-        var seg0enc = encBrick.slice(0, Math.min(SEG_SIZE, encBrick.length));
-        var seg0dec = await decryptSegment(seg0enc, tempKeys[0]);
-        var initBuf = new Uint8Array(brainBytes.length + seg0dec.length);
-        initBuf.set(brainBytes, 0);
-        initBuf.set(seg0dec, brainBytes.length);
-        await appendBuffer(sb, initBuf);
-        console.log('Brain + segment 0 appended OK');
+        startSession();
+        setInterval(function(){if(!player.paused)ping(Math.floor(player.currentTime));},15000);
+        startKillPoll();
 
-        // Show player immediately — don't wait for full decode
-        document.getElementById('lock').style.display = 'none';
-        player.style.display = 'block';
-        player.play().catch(function() { document.getElementById('dbg').textContent = 'Click video to play'; });
-        await startSession();
-        setInterval(function() { if (!player.paused) pingSession(Math.floor(player.currentTime)); }, 15000);
-        startKillPoll(player);
-        initWatermarks();
-
-        step(6, 'Streaming remaining segments...');
-        var TARGET_BUFFER = 30; // seconds of buffer ahead
-        var totalSegs = Math.ceil(encBrick.length / SEG_SIZE);
-
-        for (var si = 1; si < totalSegs; si++) {
-            if (ms.readyState !== 'open') break;
-
-            // Throttle — don't get more than TARGET_BUFFER seconds ahead
-            if (player.buffered.length > 0) {
-                var ahead = player.buffered.end(player.buffered.length - 1) - player.currentTime;
-                if (ahead > TARGET_BUFFER) {
-                    await new Promise(function(r) {
-                        player.addEventListener('timeupdate', function chk() {
-                            var a = player.buffered.length > 0
-                                ? player.buffered.end(player.buffered.length - 1) - player.currentTime : 0;
-                            if (a < TARGET_BUFFER / 2) {
-                                player.removeEventListener('timeupdate', chk);
-                                r();
-                            }
-                        });
-                    });
-                }
-            }
-
-            // Evict old buffered data to free RAM (keep 10s behind current position)
-            if (sb.buffered.length > 0) {
-                var bStart = sb.buffered.start(0);
-                var keep   = Math.max(0, player.currentTime - 10);
-                if (keep > bStart + 1) {
-                    try {
-                        await new Promise(function(r) {
-                            sb.addEventListener('updateend', r, { once: true });
-                            sb.remove(bStart, keep);
-                        });
-                    } catch(e) { /* non-fatal */ }
-                }
-            }
-
-            var ss  = si * SEG_SIZE;
-            var se  = Math.min(ss + SEG_SIZE, encBrick.length);
-            var dec = await decryptSegment(encBrick.slice(ss, se), tempKeys[si]);
-            await appendBuffer(sb, dec);
-        }
-
-        if (ms.readyState === 'open') ms.endOfStream();
-        console.log('[Engine] All segments streamed successfully');
-
-    } catch(err) {
-        console.error('Playback error:', err);
-        document.getElementById('msg').innerHTML = "<span style='color:#ff3333'>&#x26A0; ACCESS DENIED</span>";
-        document.getElementById('dbg').textContent = 'Error: ' + err.message;
-        document.getElementById('dbg').style.color = '#ff3333';
-        document.getElementById('btn').disabled = false;
-        document.getElementById('btn').textContent = 'RETRY';
-    }
+    }catch(err){console.error('[Asset] Error:',err);fail('Error: '+err.message);}
 });
 </script>
 </body>

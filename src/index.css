@@ -1,26 +1,72 @@
 /* src/index.css */
+/* Team's design tokens preserved. overflow:hidden removed — app pages need to scroll. */
+
+@import url('https://fonts.googleapis.com/css2?family=Syncopate:wght@400;700&family=DM+Sans:wght@300;400;500;600;700&family=Courier+Prime:wght@400;700&display=swap');
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
 :root {
-  --bg-dark: #091a32;
-  --bg-light: #f4f6f9;
-  --panel-dark: #12243d;
-  --text-main: #ffffff;
-  --text-muted: #8ca0b3;
-  --evzones-blue: #008eff;
-  --evzones-green: #2ecc71;
+  --bg-dark:    #030200;
+  --text-main:  #f0e8d0;
+  --text-muted: rgba(180,110,15,0.55);
+  --amber:      #c8850a;
+  --amber-dim:  rgba(180,110,15,0.55);
+  --amber-bg:   rgba(200,133,10,0.06);
 }
 
 body {
   margin: 0;
-  font-family: 'Public Sans', sans-serif;
-  background-color: var(--bg-dark);
+  font-family: 'DM Sans', sans-serif;
+  /* Note: Landing and Login use overflow:hidden via their own inline styles.
+     App pages (Studio, Dashboard) need scroll — do NOT set overflow:hidden globally. */
+  background: radial-gradient(ellipse at 50% 0%, #2a1200 0%, #130800 35%, #080400 70%, #030200 100%);
   color: var(--text-main);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
 }
 
-.App {
-  display: flex;
-  justify-content: center;
-  align-items: center;
+/* Scrollbar — matches the amber theme */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #030200; }
+::-webkit-scrollbar-thumb { background: rgba(200,133,10,0.25); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(200,133,10,0.45); }
+
+/* Selection */
+::selection { background: rgba(200,133,10,0.28); color: #f0e8d0; }
+
+/* Autofill */
+input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 40px #0d0600 inset !important;
+  -webkit-text-fill-color: #c8850a !important;
+}
+input::placeholder { color: rgba(180,110,20,0.55); }
+input:focus { outline: none; }
+
+/* Animations — shared across all pages */
+@keyframes shimmer {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(220%); }
+}
+@keyframes gridScroll {
+  0%   { background-position: 0 0; }
+  100% { background-position: 40px 40px; }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+/* Root div used by Vite / React */
+#root {
   min-height: 100vh;
-  padding: 20px;
+  isolation: isolate;
 }
