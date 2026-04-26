@@ -629,7 +629,7 @@ export default function Landing() {
                   WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent",
                   backgroundClip:"text",
                 }}>
-                  Uncopyable.
+                  Uncopyable
                 </span>
               </motion.h1>
 
