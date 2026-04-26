@@ -106,7 +106,7 @@ const GlobalStyles = () => (
     .cta-btns        { flex-direction: row; flex-wrap: wrap; }
     .nav-counter     { display: flex; }
     .section-pad     { padding-top: 88px;  padding-bottom: 88px; }
-    .hero-pad        { padding-top: 88px;  padding-bottom: 88px; }
+    .hero-pad        { padding-top: 10px;  padding-bottom: 88px; }
     .cta-section-pad { padding-top: 80px;  padding-bottom: 80px; }
 
     /* ── Tablet (769-1024) ── */
@@ -119,6 +119,7 @@ const GlobalStyles = () => (
     /* ── Mobile (≤ 768) ── */
     @media (max-width: 768px) {
       .perf-v          { display: none  !important; }
+      .film-strips     { background: #080400 !important; }
       .perf-h          { display: flex  !important; }
       .page-body       { margin-left: 0 !important; margin-right: 0 !important; }
       .container       { padding: 0 18px !important; }
@@ -191,7 +192,7 @@ const CursorBlob = () => {
 const VerticalPerf = ({ side }) => (
   <div className="perf-v" style={{
     position:"fixed", top:0, bottom:0, [side]:0, width:"28px", zIndex:50,
-    background:"linear-gradient(to bottom, #0a0500, #050300, #0a0500)",
+    background:"linear-gradient(rgb(10, 5, 0), rgb(135, 103, 49), rgb(29, 23, 16))",
     borderRight: side==="left"  ? "1px solid rgba(245,166,35,0.08)" : "none",
     borderLeft:  side==="right" ? "1px solid rgba(245,166,35,0.08)" : "none",
     flexDirection:"column", alignItems:"center", justifyContent:"space-around",
@@ -227,8 +228,8 @@ const HorizPerf = ({ position }) => (
 
 // ─── Film Strip ───────────────────────────────────────────────────────────────
 const FilmStrip = () => (
-  <div style={{
-    height:"26px", background:"#060300",
+  <div className="film-strips" style={{
+    height:"26px", background:"linear-gradient(rgb(10, 5, 0), rgb(189, 148, 75), rgba(60, 42, 22, 0.99))",
     borderTop:"1px solid rgba(50,28,5,0.6)", borderBottom:"1px solid rgba(50,28,5,0.6)",
     display:"flex", alignItems:"center", justifyContent:"space-evenly",
     padding:"0 24px", overflow:"hidden",
@@ -267,7 +268,7 @@ const TickerTape = () => {
       <div style={{
         display:"flex", whiteSpace:"nowrap",
         fontFamily:FM, fontSize:"12px", letterSpacing:"0.22em",
-        color:"rgba(245,166,35,0.36)", textTransform:"uppercase",
+        color:"rgba(245, 213, 166, 0.36)", textTransform:"uppercase",
         animation:"ticker 50s linear infinite",
       }}>
         {tape}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{tape}
@@ -593,7 +594,7 @@ export default function Landing() {
                 transition={{duration:0.6,delay:0.2}}>
                 <div style={{
                   display:"flex", alignItems:"center", gap:"7px",
-                  marginBottom:"26px", flexWrap:"wrap",
+                  marginBottom:"11px", flexWrap:"wrap",
                   fontFamily:FM, fontSize:"12px",
                   color:AMBER_DIM, letterSpacing:"0.22em", textTransform:"uppercase",
                   lineHeight:1.8,
