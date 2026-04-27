@@ -285,7 +285,7 @@ export async function generateSmartAsset(processed, assetID, vaultBaseUrl, inges
     // It is embedded as an HTML comment so the file remains valid HTML.
     // The brick is appended immediately after a newline following the marker.
     const htmlBytes    = new TextEncoder().encode(html);
-    const markerStr    = `\n<!--EVZONES:BRICK_OFFSET=${htmlBytes.length + 1},BRICK_BYTES=${processed.brickByteLength}-->\n`;
+    const markerStr    = `\n<!--EVZONES:BRICK_OFFSET=${htmlBytes.length + 1},BRICK_BYTES=${processed.brickByteLength}-->\n<!--STOP--><!--\n`;
     const markerBytes  = new TextEncoder().encode(markerStr);
     const brickOffset  = htmlBytes.length + markerBytes.length;
 
@@ -428,13 +428,13 @@ function fail(s){msgEl.innerHTML='<span style="color:#ff4455">&#x26A0; ACCESS DE
 
 // ── Tiny base64 → Uint8Array (only for small crypto payloads, NOT video) ──────
 function b64(s){
-    // Convert URL‑safe base64 to standard base64
-    s = String(s).replace(/-/g, '+').replace(/_/g, '/');
-    // Remove all whitespace (including newlines, tabs)
-    s = s.replace(/\s/g, '');
+    s = String(s)
+        .replace(/-/g, '+')    // URL-safe → standard
+        .replace(/_/g, '/')
+        .replace(/\s/g, '');   // remove all whitespace (newlines, tabs, spaces)
     var b = atob(s);
     var u = new Uint8Array(b.length);
-    for(var i=0;i<b.length;i++) u[i]=b.charCodeAt(i);
+    for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
     return u;
 }
 function hex2u8(h){var u=new Uint8Array(h.length>>1);
