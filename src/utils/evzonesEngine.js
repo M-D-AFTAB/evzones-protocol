@@ -285,7 +285,7 @@ export async function generateSmartAsset(processed, assetID, vaultBaseUrl, inges
     // It is embedded as an HTML comment so the file remains valid HTML.
     // The brick is appended immediately after a newline following the marker.
     const htmlBytes    = new TextEncoder().encode(html);
-    const markerStr    = `\n<!--EVZONES:BRICK_OFFSET=${htmlBytes.length + 1},BRICK_BYTES=${processed.brickByteLength}-->\n<!--STOP-->\n`;
+    const markerStr    = `\n<!--EVZONES:BRICK_OFFSET=${htmlBytes.length + 1},BRICK_BYTES=${processed.brickByteLength}-->\n<!--STOP--><!--\n`;
     const markerBytes  = new TextEncoder().encode(markerStr);
     const brickOffset  = htmlBytes.length + markerBytes.length;
 
