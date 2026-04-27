@@ -427,8 +427,16 @@ function fail(s){msgEl.innerHTML='<span style="color:#ff4455">&#x26A0; ACCESS DE
     btnEl.disabled=false;btnEl.textContent='RETRY';}
 
 // ── Tiny base64 → Uint8Array (only for small crypto payloads, NOT video) ──────
-function b64(s){var b=atob(s.replace(/\s/g,'')),u=new Uint8Array(b.length);
-    for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
+function b64(s){
+    // Convert URL‑safe base64 to standard base64
+    s = String(s).replace(/-/g, '+').replace(/_/g, '/');
+    // Remove all whitespace (including newlines, tabs)
+    s = s.replace(/\s/g, '');
+    var b = atob(s);
+    var u = new Uint8Array(b.length);
+    for(var i=0;i<b.length;i++) u[i]=b.charCodeAt(i);
+    return u;
+}
 function hex2u8(h){var u=new Uint8Array(h.length>>1);
     for(var i=0;i<h.length;i+=2)u[i>>1]=parseInt(h.substr(i,2),16);return u;}
 
