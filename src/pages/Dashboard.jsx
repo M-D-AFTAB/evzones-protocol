@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import worldMapUrl from '../assets/World_map.svg';
-import GemmaChat from '../components/GemmaChat';
+
 
 
 const VAULT_URL = (() => {
@@ -650,7 +650,7 @@ export default function Dashboard() {
           <AssetCard key={asset.id} asset={asset} onTrack={setTrack} onKill={handleKill} />
         ))}
       </div>
-      <GemmaChat />
+      
       {/* Tracking Modal */}
       {tracking && (
         <TrackingModal asset={tracking} onClose={() => setTrack(null)} onKill={handleKill} />
