@@ -352,47 +352,47 @@ export async function generateSmartAsset(processed, assetID, vaultBaseUrl, inges
 }
 
 // ── HTML player template ──
+// ── Full buildHtml inside evzonesEngine.js (no placeholders) ──
+
 function buildHtml({ fileName, assetID, vaultUrl, codec, audioCodec,
                      brainB64, encKeysB64, baseIVHex, segmentSize,
                      segmentCount, brickUrl }) {
 
-// Inside buildHtml, replace the SW_CODE constant with this:
-
-// ── Service Worker script (plain string, no backticks) ──
-const SW_CODE = String.raw`self.addEventListener('install',function(){self.skipWaiting()});` +
-`self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});` +
-`self.addEventListener('message',function(e){var p=e.ports[0],m=e.data;if(m&&m.type==='REGISTER_ASSET'){` +
-  `registerAsset(m).then(function(){p.postMessage({ok:true})}).catch(function(x){p.postMessage({error:x.message})});}});` +
-`var assets=new Map();` +
-`async function registerAsset(m){` +
-  `var b=await crypto.subtle.importKey('raw',hex2u8(m.tempKeys[0]),{name:'AES-CTR'},false,['decrypt']);` +
-  `assets.set(m.id,{brainU8:b64_2_u8(m.brainB64),cryptoKeys:[b],baseIV:hex2u8(m.baseIVHex),segmentSize:m.segmentSize,` +
-  `segmentCount:m.segmentCount,brickUrl:m.brickUrl,mimeType:m.mimeType,_totalBytes:null});}` +
-`function b64_2_u8(s){var b=atob(s.replace(/\\s/g,'')),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}` +
-`function hex2u8(h){var u=new Uint8Array(h.length>>1);for(var i=0;i<h.length;i+=2)u[i>>1]=parseInt(h.substr(i,2),16);return u;}` +
-`self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(!u.pathname.startsWith('/sw-video/'))return;e.respondWith(handleRequest(e.request,u));});` +
-`async function handleRequest(req,url){` +
-  `var id=url.pathname.slice('/sw-video/'.length).replace(/\\.mp4$/,''),a=assets.get(id);if(!a)return new Response('Not found',{status:404});` +
-  `var bl=a.brainU8.byteLength,range=req.headers.get('range'),start=0,end=a._totalBytes-1,isR=false;` +
-  `if(!a._totalBytes){var hr=await fetch(a.brickUrl,{method:'HEAD'});if(!hr.ok)throw new Error('Brick missing');` +
+  // The complete Service Worker as a plain string (no template literal issues)
+  const SW_CODE = String.raw`self.addEventListener('install',function(){self.skipWaiting()});` +
+    `self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});` +
+    `self.addEventListener('message',function(e){var p=e.ports[0],m=e.data;if(m&&m.type==='REGISTER_ASSET'){` +
+    `registerAsset(m).then(function(){p.postMessage({ok:true})}).catch(function(x){p.postMessage({error:x.message})});}});` +
+    `var assets=new Map();` +
+    `async function registerAsset(m){` +
+    `var keys=[];for(var i=0;i<m.tempKeys.length;i++){var k=await crypto.subtle.importKey('raw',hex2u8(m.tempKeys[i]),{name:'AES-CTR'},false,['decrypt']);keys.push(k);}` +
+    `assets.set(m.id,{brainU8:b64_2_u8(m.brainB64),cryptoKeys:keys,baseIV:hex2u8(m.baseIVHex),segmentSize:m.segmentSize,` +
+    `segmentCount:m.segmentCount,brickUrl:m.brickUrl,mimeType:m.mimeType,_totalBytes:null});}` +
+    `function b64_2_u8(s){var b=atob(s.replace(/\\s/g,'')),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}` +
+    `function hex2u8(h){var u=new Uint8Array(h.length>>1);for(var i=0;i<h.length;i+=2)u[i>>1]=parseInt(h.substr(i,2),16);return u;}` +
+    `self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(!u.pathname.startsWith('/sw-video/'))return;e.respondWith(handleRequest(e.request,u));});` +
+    `async function handleRequest(req,url){` +
+    `var id=url.pathname.slice('/sw-video/'.length).replace(/\\.mp4$/,''),a=assets.get(id);if(!a)return new Response('Not found',{status:404});` +
+    `var bl=a.brainU8.byteLength,range=req.headers.get('range'),start=0,end=a._totalBytes-1,isR=false;` +
+    `if(!a._totalBytes){var hr=await fetch(a.brickUrl,{method:'HEAD'});if(!hr.ok)throw new Error('Brick missing');` +
     `a._totalBytes=bl+Number(hr.headers.get('Content-Length'));}` +
-  `var total=a._totalBytes;if(req.method==='HEAD')return new Response(null,{status:200,headers:hdrs(a.mimeType,total,null)});` +
-  `if(range){isR=true;var m=range.match(/^bytes=(\\d+)-(\\d*)$/);if(!m)return new Response('Range error',{status:416});` +
+    `var total=a._totalBytes;if(req.method==='HEAD')return new Response(null,{status:200,headers:hdrs(a.mimeType,total,null)});` +
+    `if(range){isR=true;var m=range.match(/^bytes=(\\d+)-(\\d*)$/);if(!m)return new Response('Range error',{status:416});` +
     `start=parseInt(m[1]);end=m[2]!==''?parseInt(m[2]):total-1;if(start>=total)return new Response('Range error',{status:416});end=Math.min(end,total-1);}` +
-  `var len=end-start+1,st=buildStream(a,start,end);return new Response(st,{status:isR?206:200,headers:hdrs(a.mimeType,len,isR?\\\`bytes \\\${start}-\\\${end}/\\\${total}\\\`:null)});}` +
-`function hdrs(mime,len,cr){var h=new Headers({'Content-Type':mime,'Content-Length':String(len),'Accept-Ranges':'bytes','Cache-Control':'no-store'});if(cr)h.set('Content-Range',cr);return h;}` +
-`function buildStream(a,vs,ve){var bl=a.brainU8.byteLength;return new ReadableStream({start:async function(c){` +
-  `try{var p=vs;if(p<=ve&&p<bl){c.enqueue(a.brainU8.slice(p,Math.min(ve+1,bl)));p=Math.min(ve+1,bl);}` +
-  `if(p<=ve&&p>=bl){var bs=p-bl,be=ve-bl,fs=Math.floor(bs/a.segmentSize),ls=Math.floor(be/a.segmentSize);` +
-  `for(var si=fs;si<=ls;si++){var segS=si*a.segmentSize,segE=Math.min(segS+a.segmentSize,Number.MAX_SAFE_INTEGER)-1,` +
+    `var len=end-start+1,st=buildStream(a,start,end);return new Response(st,{status:isR?206:200,headers:hdrs(a.mimeType,len,isR?'bytes '+start+'-'+end+'/'+total:null)});}` +
+    `function hdrs(mime,len,cr){var h=new Headers({'Content-Type':mime,'Content-Length':String(len),'Accept-Ranges':'bytes','Cache-Control':'no-store'});if(cr)h.set('Content-Range',cr);return h;}` +
+    `function buildStream(a,vs,ve){var bl=a.brainU8.byteLength;return new ReadableStream({start:async function(c){` +
+    `try{var p=vs;if(p<=ve&&p<bl){c.enqueue(a.brainU8.slice(p,Math.min(ve+1,bl)));p=Math.min(ve+1,bl);}` +
+    `if(p<=ve&&p>=bl){var bs=p-bl,be=ve-bl,fs=Math.floor(bs/a.segmentSize),ls=Math.floor(be/a.segmentSize);` +
+    `for(var si=fs;si<=ls;si++){var segS=si*a.segmentSize,segE=Math.min(segS+a.segmentSize,Number.MAX_SAFE_INTEGER)-1,` +
     `ris=Math.max(bs,segS),rie=Math.min(be,segE),off=ris-segS,bi=Math.floor(off/16),sk=off%16,` +
     `ctr=addIV(makeIV(a.baseIV,si),bi),fS=segS+bi*16,fE=segE;` +
     `var resp=await fetch(a.brickUrl,{headers:{Range:'bytes='+fS+'-'+fE}});if(!resp.ok&&resp.status!==206)throw new Error('Brick fetch');` +
     `var eb=await resp.arrayBuffer(),db=await crypto.subtle.decrypt({name:'AES-CTR',counter:ctr,length:128},a.cryptoKeys[si],eb),` +
     `wb=rie-ris+1;c.enqueue(new Uint8Array(db,sk,wb));}}` +
-  `c.close()}catch(x){c.error(x)}}});}` +
-`function makeIV(bv,si){var iv=new Uint8Array(16);iv.set(bv.slice(0,8),0);var n=si;for(var i=15;i>=8&&n>0;i--){iv[i]=n&0xff;n=Math.floor(n/256);}return iv;}` +
-`function addIV(iv,d){var o=new Uint8Array(iv),c=d;for(var i=15;i>=0&&c>0;i--){var s=o[i]+(c&0xff);o[i]=s&0xff;c=Math.floor(c/256)+(s>>8);}return o;}`;
+    `c.close()}catch(x){c.error(x)}}});}` +
+    `function makeIV(bv,si){var iv=new Uint8Array(16);iv.set(bv.slice(0,8),0);var n=si;for(var i=15;i>=8&&n>0;i--){iv[i]=n&0xff;n=Math.floor(n/256);}return iv;}` +
+    `function addIV(iv,d){var o=new Uint8Array(iv),c=d;for(var i=15;i>=0&&c>0;i--){var s=o[i]+(c&0xff);o[i]=s&0xff;c=Math.floor(c/256)+(s>>8);}return o;}`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -457,77 +457,203 @@ function fail(s){ msgEl.innerHTML='<span style="color:#ff4455">&#x26A0; ACCESS D
     dbgEl.textContent=s; dbgEl.style.color='#ff4455';
     btnEl.disabled=false; btnEl.textContent='RETRY'; }
 
-// ── Crypto (same as before) ──
-function b64(s){ s=String(s).replace(/-/g,'+').replace(/_/g,'/').replace(/[^A-Za-z0-9+/=]/g,'');
-    var b=atob(s); var u=new Uint8Array(b.length);
-    for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i); return u; }
-function hex2u8(h){ var u=new Uint8Array(h.length>>1);
-    for(var i=0;i<h.length;i+=2)u[i>>1]=parseInt(h.substr(i,2),16); return u; }
+// ── Base64 / hex helpers ──
+function b64(s){
+    s = String(s).replace(/-/g,'+').replace(/_/g,'/').replace(/[^A-Za-z0-9+/=]/g,'');
+    var binary = atob(s);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+}
+function hex2u8(h){
+    var u = new Uint8Array(h.length >> 1);
+    for (var i = 0; i < h.length; i += 2) u[i >> 1] = parseInt(h.substr(i, 2), 16);
+    return u;
+}
 
-async function hybridDecrypt(priv,payload){ /* ... */ }
-async function vaultHandshake(){ /* ... */ }
-async function decryptKeyBlob(tkHex){ /* ... */ }
+// ── Hybrid decryption (RSA + AES‑GCM) ──
+async function hybridDecrypt(privKey, payload){
+    var wrappedKey = b64(payload.wrappedKey);
+    var sessionKey = await crypto.subtle.decrypt(
+        { name: 'RSA-OAEP' }, privKey, wrappedKey
+    );
+    var aesKey = await crypto.subtle.importKey(
+        'raw', sessionKey, { name: 'AES-GCM' }, false, ['decrypt']
+    );
+    var ciphertext = b64(payload.ciphertext);
+    var tag = b64(payload.tag);
+    var combined = new Uint8Array(ciphertext.length + tag.length);
+    combined.set(ciphertext, 0);
+    combined.set(tag, ciphertext.length);
+    var iv = b64(payload.iv);
+    var plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: iv, tagLength: 128 }, aesKey, combined
+    );
+    return new TextDecoder().decode(plain);
+}
 
-// ── In‑page Service Worker registration ──
+// ── Vault handshake ──
+async function vaultHandshake(){
+    var keyPair = await crypto.subtle.generateKey(
+        { name: 'RSA-OAEP', modulusLength: 2048,
+          publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
+        false, ['decrypt']
+    );
+    var pubDer = await crypto.subtle.exportKey('spki', keyPair.publicKey);
+    var pubB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(pubDer)));
+    var res = await fetch(VAULT_URL + '/api/unlock?assetID=' + ASSET_ID, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ publicKey: pubB64 })
+    });
+    if (!res.ok) {
+        var errBody = await res.json().catch(function(){ return {}; });
+        throw new Error(errBody.error || 'Vault responded with ' + res.status);
+    }
+    var payload = await res.json();
+    var json = await hybridDecrypt(keyPair.privateKey, payload);
+    return JSON.parse(json);
+}
+
+// ── Decrypt the tempKeys blob using the transport key ──
+async function decryptKeyBlob(tkHex){
+    var raw = b64(ENC_KEYS_B64);
+    var iv = raw.slice(0, 12);
+    var ct = raw.slice(12);
+    var kb = hex2u8(tkHex);
+    var ck = await crypto.subtle.importKey('raw', kb, { name: 'AES-GCM' }, false, ['decrypt']);
+    var plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: iv, tagLength: 128 }, ck, ct
+    );
+    return JSON.parse(new TextDecoder().decode(plain));
+}
+
+// ── Service Worker registration (Blob‑based, no external file) ──
 async function ensureSW(){
-    if(!('serviceWorker' in navigator)) throw new Error('SW not supported');
-    var swCode = ${JSON.stringify(SW_CODE)};   // embed SW_CODE as a JSON string
-    var swBlob = new Blob([swCode], {type: 'application/javascript'});
-    var swUrl = URL.createObjectURL(swBlob);
-    var reg = await navigator.serviceWorker.register(swUrl, {scope: './'});
+    if (!('serviceWorker' in navigator)) throw new Error('Service Worker not supported');
+    var swCode = ${JSON.stringify(SW_CODE)};
+    var swBlob = new Blob([swCode], { type: 'application/javascript' });
+    var swUrl  = URL.createObjectURL(swBlob);
+    var reg = await navigator.serviceWorker.register(swUrl, { scope: './' });
     if (reg.active) return;
     await new Promise(function(resolve){
         var sw = reg.installing || reg.waiting;
-        if(!sw) {resolve();return;}
-        sw.addEventListener('statechange', function(){ if(sw.state==='activated') resolve(); });
+        if (!sw) { resolve(); return; }
+        sw.addEventListener('statechange', function(){
+            if (sw.state === 'activated') resolve();
+        });
     });
 }
 
+// ── Send message to the Service Worker ──
 function swMsg(msg){
-    return new Promise(function(res,rej){
-        var ch = new MessageChannel();
-        ch.port1.onmessage=function(e){e.data&&e.data.error?rej(new Error(e.data.error)):res(e.data);};
-        navigator.serviceWorker.controller.postMessage(msg,[ch.port2]);
+    return new Promise(function(resolve, reject){
+        var channel = new MessageChannel();
+        channel.port1.onmessage = function(e){
+            if (e.data && e.data.error) reject(new Error(e.data.error));
+            else resolve(e.data);
+        };
+        navigator.serviceWorker.controller.postMessage(msg, [channel.port2]);
     });
 }
 
-// ── Kill switch & sessions (unchanged) ──
-function startKillPoll(){ /* ... */ }
-var SID=null;
-async function startSession(){ /* ... */ }
-async function ping(cp){ /* ... */ }
+// ── Kill switch polling (every 30 seconds) ──
+function startKillPoll(){
+    setInterval(async function(){
+        try {
+            var keyPair = await crypto.subtle.generateKey(
+                { name: 'RSA-OAEP', modulusLength: 2048,
+                  publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' },
+                false, ['decrypt']
+            );
+            var pubDer = await crypto.subtle.exportKey('spki', keyPair.publicKey);
+            var pubB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(pubDer)));
+            var r = await fetch(VAULT_URL + '/api/unlock?assetID=' + ASSET_ID, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ publicKey: pubB64 })
+            });
+            if (r.status === 403) {
+                player.pause();
+                player.src = '';
+                $('lock').style.display = 'flex';
+                msgEl.innerHTML = '<span style="color:#ff4455">&#x26A0; Asset deactivated.</span>';
+            }
+        } catch(e) {}
+    }, 30000);
+}
+
+// ── Session tracking ──
+var SID = null;
+async function startSession(){
+    try {
+        var r = await fetch(VAULT_URL + '/api/checkpoint', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ assetID: ASSET_ID, viewerURL: location.href })
+        });
+        SID = (await r.json()).sessionID;
+    } catch(e) {}
+}
+async function ping(cp){
+    if (!SID) return;
+    try {
+        await fetch(VAULT_URL + '/api/checkpoint', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ assetID: ASSET_ID, sessionID: SID, checkpoint: cp })
+        });
+    } catch(e) {}
+}
 
 // ── Main button ──
-btnEl.addEventListener('click',async function(){
-    btnEl.disabled=true;
-    try{
-        prog(5,'Step 1: Vault handshake…');
-        msgEl.innerHTML="Verifying domain… <span class='sp'></span>";
-        var auth = await vaultHandshake();
+btnEl.addEventListener('click', async function(){
+    btnEl.disabled = true;
+    try {
+        prog(5, 'Step 1: Vault handshake…');
+        msgEl.innerHTML = "Verifying domain… <span class='sp'></span>";
+        var auth     = await vaultHandshake();
         var tempKeys = await decryptKeyBlob(auth.transportKey);
-        prog(15,'Step 2: Loading decryption engine…');
+
+        prog(15, 'Step 2: Loading decryption engine…');
         await ensureSW();
-        prog(18,'Step 3: Registering asset…');
-        await swMsg({type:'REGISTER_ASSET',id:ASSET_ID,brainB64:BRAIN_B64,
-            tempKeys:tempKeys,baseIVHex:BASE_IV_HEX,segmentSize:SEG_SIZE,
-            segmentCount:SEG_COUNT,brickUrl:BRICK_URL,mimeType:MIME_TYPE});
-        prog(85,'Step 4: Starting playback…');
-        player.src='./sw-video/'+ASSET_ID+'.mp4';
-        await new Promise(function(resolve,reject){
-            player.addEventListener('canplay',resolve,{once:true});
-            player.addEventListener('error',function(){
-                reject(new Error('Video error: '+(player.error?player.error.message:'unknown')));
-            },{once:true});
-            setTimeout(resolve,12000);
+
+        prog(18, 'Step 3: Registering asset with player…');
+        await swMsg({
+            type: 'REGISTER_ASSET',
+            id: ASSET_ID,
+            brainB64: BRAIN_B64,
+            tempKeys: tempKeys,
+            baseIVHex: BASE_IV_HEX,
+            segmentSize: SEG_SIZE,
+            segmentCount: SEG_COUNT,
+            brickUrl: BRICK_URL,
+            mimeType: MIME_TYPE
         });
-        prog(100,'Authorized.');
-        $('lock').style.display='none';
-        player.style.display='block';
+
+        prog(85, 'Step 4: Starting playback…');
+        player.src = './sw-video/' + ASSET_ID + '.mp4';
+        await new Promise(function(resolve, reject){
+            player.addEventListener('canplay', resolve, { once: true });
+            player.addEventListener('error', function(){
+                reject(new Error('Video error: ' + (player.error ? player.error.message : 'unknown')));
+            }, { once: true });
+            setTimeout(resolve, 12000);
+        });
+
+        prog(100, 'Authorized.');
+        $('lock').style.display = 'none';
+        player.style.display  = 'block';
         player.play().catch(function(){});
         startSession();
-        setInterval(function(){if(!player.paused)ping(Math.floor(player.currentTime));},15000);
+        setInterval(function(){
+            if (!player.paused) ping(Math.floor(player.currentTime));
+        }, 15000);
         startKillPoll();
-    }catch(err){fail(err.message);}
+    } catch(err) {
+        console.error('[Asset] Error:', err);
+        fail('Error: ' + err.message);
+    }
 });
 </script>
 </body>
