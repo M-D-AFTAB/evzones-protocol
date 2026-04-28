@@ -1,10 +1,15 @@
 // api/chat.js
 import Groq from 'groq-sdk';
 
+// Check if API key exists early
+if (!process.env.GROQ_API_KEY) {
+  console.error('FATAL: GROQ_API_KEY is not set in environment variables');
+}
+
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 export default async function handler(req, res) {
-  // Handle CORS preflight request
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
@@ -19,15 +24,20 @@ export default async function handler(req, res) {
   }
 
   try {
+    console.log('GROQ_API_KEY exists?', !!process.env.GROQ_API_KEY);
+    
     const completion = await groq.chat.completions.create({
-      model: 'gemma2-9b-it', // Blazing fast and powerful
+      model: 'gemma2-9b-it',
       messages,
       temperature: 0.7,
       max_tokens: 512,
     });
-    res.status(200).json({ reply: completion.choices[0].message.content });
+    
+    const reply = completion.choices[0].message.content;
+    res.status(200).json({ reply });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to generate response' });
+    console.error('Groq API error:', err);
+    // Send back the actual error message so you can see it in the browser console
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 }
