@@ -37,7 +37,6 @@ export default async function handler(req, res) {
     res.status(200).json({ reply });
   } catch (err) {
     console.error('Groq API error:', err);
-    // Send back the actual error message so you can see it in the browser console
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 }
