@@ -356,186 +356,187 @@ function buildHtml({ fileName, assetID, vaultUrl, codec, audioCodec,
                      brainB64, encKeysB64, baseIVHex, segmentSize,
                      segmentCount, brickUrl }) {
 
-  // The Service Worker code – identical to the previous sw.js
-  const SW_CODE = `
-    const assets = new Map();
+// Inside buildHtml, replace the SW_CODE constant with this:
 
-    self.addEventListener('install', () => self.skipWaiting());
-    self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+const SW_CODE = `
+const assets = new Map();
 
-    self.addEventListener('message', async (event) => {
-      const msg = event.data || {};
-      const port = event.ports[0];
-      if (msg.type === 'REGISTER_ASSET') {
-        try {
-          await registerAsset(msg);
-          port?.postMessage({ ok: true });
-        } catch (err) {
-          port?.postMessage({ error: err.message });
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+
+self.addEventListener('message', async (event) => {
+  const msg = event.data || {};
+  const port = event.ports[0];
+  if (msg.type === 'REGISTER_ASSET') {
+    try {
+      await registerAsset(msg);
+      port?.postMessage({ ok: true });
+    } catch (err) {
+      port?.postMessage({ error: err.message });
+    }
+  }
+});
+
+async function registerAsset(msg) {
+  const brainU8 = b64ToU8(msg.brainB64);
+  const baseIV = hexToU8(msg.baseIVHex);
+  const cryptoKeys = await Promise.all(
+    msg.tempKeys.map(hex =>
+      crypto.subtle.importKey('raw', hexToU8(hex), { name: 'AES-CTR' }, false, ['decrypt'])
+    )
+  );
+  assets.set(msg.id, {
+    brainU8,
+    cryptoKeys,
+    baseIV,
+    segmentSize: msg.segmentSize,
+    segmentCount: msg.segmentCount,
+    brickUrl: msg.brickUrl,
+    mimeType: msg.mimeType,
+    _totalBytes: null,
+  });
+}
+
+self.addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
+  if (!url.pathname.startsWith('/sw-video/')) return;
+  event.respondWith(handleVideoRequest(event.request, url));
+});
+
+async function handleVideoRequest(request, url) {
+  const assetID = url.pathname.slice('/sw-video/'.length).replace(/\\.mp4$/, '');
+  const asset = assets.get(assetID);
+  if (!asset) return new Response('Asset not registered', { status: 404 });
+
+  const { brainU8, mimeType } = asset;
+  const brainLen = brainU8.byteLength;
+
+  if (!asset._totalBytes) {
+    const headResp = await fetch(asset.brickUrl, { method: 'HEAD' });
+    if (!headResp.ok) throw new Error('Brick not accessible');
+    const brickLen = Number(headResp.headers.get('Content-Length'));
+    asset._totalBytes = brainLen + brickLen;
+  }
+
+  const totalBytes = asset._totalBytes;
+
+  if (request.method === 'HEAD') {
+    return new Response(null, { status: 200, headers: makeHeaders(mimeType, totalBytes, null) });
+  }
+
+  const rangeHeader = request.headers.get('range');
+  let start = 0, end = totalBytes - 1, isRange = false;
+  if (rangeHeader) {
+    isRange = true;
+    const m = rangeHeader.match(/^bytes=(\\d+)-(\\d*)$/);
+    if (!m) return new Response('Range Not Satisfiable', { status: 416 });
+    start = parseInt(m[1]);
+    end = m[2] !== '' ? parseInt(m[2]) : totalBytes - 1;
+    if (start >= totalBytes) return new Response('Range Not Satisfiable', { status: 416 });
+    end = Math.min(end, totalBytes - 1);
+  }
+
+  const length = end - start + 1;
+  const stream = buildStream(asset, start, end);
+
+  return new Response(stream, {
+    status: isRange ? 206 : 200,
+    headers: makeHeaders(mimeType, length, isRange ? \`bytes \${start}-\${end}/\${totalBytes}\` : null),
+  });
+}
+
+function makeHeaders(mimeType, len, contentRange) {
+  const h = new Headers({
+    'Content-Type': mimeType,
+    'Content-Length': String(len),
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'no-store',
+  });
+  if (contentRange) h.set('Content-Range', contentRange);
+  return h;
+}
+
+function buildStream(asset, vStart, vEnd) {
+  const { brainU8, cryptoKeys, baseIV, segmentSize, brickUrl } = asset;
+  const brainLen = brainU8.byteLength;
+
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        let pos = vStart;
+        if (pos <= vEnd && pos < brainLen) {
+          controller.enqueue(brainU8.slice(pos, Math.min(vEnd + 1, brainLen)));
+          pos = Math.min(vEnd + 1, brainLen);
         }
-      }
-    });
+        if (pos <= vEnd && pos >= brainLen) {
+          const brickStart = pos - brainLen;
+          const brickEnd = vEnd - brainLen;
+          const firstSeg = Math.floor(brickStart / segmentSize);
+          const lastSeg = Math.floor(brickEnd / segmentSize);
+          for (let si = firstSeg; si <= lastSeg; si++) {
+            const segEncStart = si * segmentSize;
+            const segEncEnd = Math.min(segEncStart + segmentSize, Number.MAX_SAFE_INTEGER) - 1;
+            const rangeInSegStart = Math.max(brickStart, segEncStart);
+            const rangeInSegEnd = Math.min(brickEnd, segEncEnd);
+            const offsetInSeg = rangeInSegStart - segEncStart;
+            const blockIndex = Math.floor(offsetInSeg / 16);
+            const skippedBytes = offsetInSeg % 16;
+            const counter = addToIV(makeSegmentIV(baseIV, si), blockIndex);
+            const fetchStart = segEncStart + blockIndex * 16;
+            const fetchEnd = segEncEnd;
+            const resp = await fetch(brickUrl, { headers: { Range: \`bytes=\${fetchStart}-\${fetchEnd}\` } });
+            if (!resp.ok && resp.status !== 206) throw new Error('Brick fetch failed');
+            const encBuf = await resp.arrayBuffer();
+            const decBuf = await crypto.subtle.decrypt(
+              { name: 'AES-CTR', counter, length: 128 },
+              cryptoKeys[si],
+              encBuf
+            );
+            const wantedBytes = rangeInSegEnd - rangeInSegStart + 1;
+            controller.enqueue(new Uint8Array(decBuf, skippedBytes, wantedBytes));
+          }
+        }
+        controller.close();
+      } catch (err) { controller.error(err); }
+    },
+  });
+}
 
-    async function registerAsset(msg) {
-      const brainU8 = b64ToU8(msg.brainB64);
-      const baseIV = hexToU8(msg.baseIVHex);
-      const cryptoKeys = await Promise.all(
-        msg.tempKeys.map(hex =>
-          crypto.subtle.importKey('raw', hexToU8(hex), { name: 'AES-CTR' }, false, ['decrypt'])
-        )
-      );
-      assets.set(msg.id, {
-        brainU8,
-        cryptoKeys,
-        baseIV,
-        segmentSize: msg.segmentSize,
-        segmentCount: msg.segmentCount,
-        brickUrl: msg.brickUrl,
-        mimeType: msg.mimeType,
-        _totalBytes: null,
-      });
-    }
+function makeSegmentIV(baseIV, segIdx) {
+  const iv = new Uint8Array(16);
+  iv.set(baseIV.slice(0, 8), 0);
+  let n = segIdx;
+  for (let b = 15; b >= 8 && n > 0; b--) {
+    iv[b] = n & 0xff;
+    n = Math.floor(n / 256);
+  }
+  return iv;
+}
 
-    self.addEventListener('fetch', event => {
-      const url = new URL(event.request.url);
-      if (!url.pathname.startsWith('/sw-video/')) return;
-      event.respondWith(handleVideoRequest(event.request, url));
-    });
+function addToIV(iv, delta) {
+  const out = new Uint8Array(iv);
+  let carry = delta;
+  for (let b = 15; b >= 0 && carry > 0; b--) {
+    const sum = out[b] + (carry & 0xff);
+    out[b] = sum & 0xff;
+    carry = Math.floor(carry / 256) + (sum >> 8);
+  }
+  return out;
+}
 
-    async function handleVideoRequest(request, url) {
-      const assetID = url.pathname.slice('/sw-video/'.length).replace(/\\.mp4$/, '');
-      const asset = assets.get(assetID);
-      if (!asset) return new Response('Asset not registered', { status: 404 });
+function b64ToU8(b64) {
+  const bin = atob(b64.replace(/\\s/g, ''));
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
 
-      const { brainU8, mimeType } = asset;
-      const brainLen = brainU8.byteLength;
-
-      if (!asset._totalBytes) {
-        const headResp = await fetch(asset.brickUrl, { method: 'HEAD' });
-        if (!headResp.ok) throw new Error('Brick not accessible');
-        const brickLen = Number(headResp.headers.get('Content-Length'));
-        asset._totalBytes = brainLen + brickLen;
-      }
-
-      const totalBytes = asset._totalBytes;
-
-      if (request.method === 'HEAD') {
-        return new Response(null, { status: 200, headers: makeHeaders(mimeType, totalBytes, null) });
-      }
-
-      const rangeHeader = request.headers.get('range');
-      let start = 0, end = totalBytes - 1, isRange = false;
-      if (rangeHeader) {
-        isRange = true;
-        const m = rangeHeader.match(/^bytes=(\\d+)-(\\d*)$/);
-        if (!m) return new Response('Range Not Satisfiable', { status: 416 });
-        start = parseInt(m[1]);
-        end = m[2] !== '' ? parseInt(m[2]) : totalBytes - 1;
-        if (start >= totalBytes) return new Response('Range Not Satisfiable', { status: 416 });
-        end = Math.min(end, totalBytes - 1);
-      }
-
-      const length = end - start + 1;
-      const stream = buildStream(asset, start, end);
-
-      return new Response(stream, {
-        status: isRange ? 206 : 200,
-        headers: makeHeaders(mimeType, length, isRange ? \`bytes \${start}-\${end}/\${totalBytes}\` : null),
-      });
-    }
-
-    function makeHeaders(mimeType, len, contentRange) {
-      const h = new Headers({
-        'Content-Type': mimeType,
-        'Content-Length': String(len),
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-store',
-      });
-      if (contentRange) h.set('Content-Range', contentRange);
-      return h;
-    }
-
-    function buildStream(asset, vStart, vEnd) {
-      const { brainU8, cryptoKeys, baseIV, segmentSize, brickUrl } = asset;
-      const brainLen = brainU8.byteLength;
-
-      return new ReadableStream({
-        async start(controller) {
-          try {
-            let pos = vStart;
-            if (pos <= vEnd && pos < brainLen) {
-              controller.enqueue(brainU8.slice(pos, Math.min(vEnd + 1, brainLen)));
-              pos = Math.min(vEnd + 1, brainLen);
-            }
-            if (pos <= vEnd && pos >= brainLen) {
-              const brickStart = pos - brainLen;
-              const brickEnd = vEnd - brainLen;
-              const firstSeg = Math.floor(brickStart / segmentSize);
-              const lastSeg = Math.floor(brickEnd / segmentSize);
-              for (let si = firstSeg; si <= lastSeg; si++) {
-                const segEncStart = si * segmentSize;
-                const segEncEnd = Math.min(segEncStart + segmentSize, Number.MAX_SAFE_INTEGER) - 1;
-                const rangeInSegStart = Math.max(brickStart, segEncStart);
-                const rangeInSegEnd = Math.min(brickEnd, segEncEnd);
-                const offsetInSeg = rangeInSegStart - segEncStart;
-                const blockIndex = Math.floor(offsetInSeg / 16);
-                const skippedBytes = offsetInSeg % 16;
-                const counter = addToIV(makeSegmentIV(baseIV, si), blockIndex);
-                const fetchStart = segEncStart + blockIndex * 16;
-                const fetchEnd = segEncEnd;
-                const resp = await fetch(brickUrl, { headers: { Range: \`bytes=\${fetchStart}-\${fetchEnd}\` } });
-                if (!resp.ok && resp.status !== 206) throw new Error('Brick fetch failed');
-                const encBuf = await resp.arrayBuffer();
-                const decBuf = await crypto.subtle.decrypt(
-                  { name: 'AES-CTR', counter, length: 128 },
-                  cryptoKeys[si],
-                  encBuf
-                );
-                const wantedBytes = rangeInSegEnd - rangeInSegStart + 1;
-                controller.enqueue(new Uint8Array(decBuf, skippedBytes, wantedBytes));
-              }
-            }
-            controller.close();
-          } catch (err) { controller.error(err); }
-        },
-      });
-    }
-
-    function makeSegmentIV(baseIV, segIdx) {
-      const iv = new Uint8Array(16);
-      iv.set(baseIV.slice(0, 8), 0);
-      let n = segIdx;
-      for (let b = 15; b >= 8 && n > 0; b--) {
-        iv[b] = n & 0xff;
-        n = Math.floor(n / 256);
-      }
-      return iv;
-    }
-
-    function addToIV(iv, delta) {
-      const out = new Uint8Array(iv);
-      let carry = delta;
-      for (let b = 15; b >= 0 && carry > 0; b--) {
-        const sum = out[b] + (carry & 0xff);
-        out[b] = sum & 0xff;
-        carry = Math.floor(carry / 256) + (sum >> 8);
-      }
-      return out;
-    }
-
-    function b64ToU8(b64) {
-      const bin = atob(b64.replace(/\\s/g, ''));
-      const u8 = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-      return u8;
-    }
-
-    function hexToU8(hex) {
-      const u8 = new Uint8Array(hex.length >> 1);
-      for (let i = 0; i < hex.length; i += 2) u8[i >> 1] = parseInt(hex.substr(i, 2), 16);
-      return u8;
-    }
-  `;
+function hexToU8(hex) {
+  const u8 = new Uint8Array(hex.length >> 1);
+  for (let i = 0; i < hex.length; i += 2) u8[i >> 1] = parseInt(hex.substr(i, 2), 16);
+  return u8;
+}
+`;
 
   return `<!DOCTYPE html>
 <html lang="en">
