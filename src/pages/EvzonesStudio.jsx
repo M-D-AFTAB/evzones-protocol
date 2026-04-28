@@ -1,518 +1,339 @@
-// src/pages/EvzonesStudio.jsx — Modern theme, preserves all FFmpeg/vault logic
-import React, { useState, useCallback } from 'react';
+import React, { useState, useRef } from 'react';
 import { processEvzonesVideo, generateSmartAsset } from '../utils/evzonesEngine';
-import { useAuth } from '../context/AuthContext';
 
-const VAULT_URL = (() => {
-  if (import.meta.env.VITE_VAULT_URL) return import.meta.env.VITE_VAULT_URL;
-  const h = window.location.hostname;
-  return h === 'localhost' || h === '127.0.0.1' ? 'http://localhost:3001' : window.location.origin;
-})();
-
-function Panel({ children, style = {} }) {
-  return (
-    <div
-      style={{
-        position: 'relative',
-        borderRadius: '16px',
-        background: 'var(--bg-secondary)',
-        border: '1px solid var(--border)',
-        boxShadow: 'var(--shadow-sm)',
-        transition: 'var(--transition)',
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function ProgressBar({ pct, label }) {
-  return (
-    <div style={{ marginTop: '12px' }}>
-      <div
-        style={{
-          height: '4px',
-          background: 'var(--bg-surface)',
-          borderRadius: '2px',
-          overflow: 'hidden',
-          marginBottom: '8px',
-        }}
-      >
-        <div
-          style={{
-            height: '100%',
-            width: `${pct}%`,
-            background: 'var(--accent)',
-            borderRadius: '2px',
-            transition: 'width 0.3s ease',
-          }}
-        />
-      </div>
-      <span style={{ fontFamily: 'Inter, sans-serif', fontSize: '12px', color: 'var(--text-muted)' }}>
-        {label}
-      </span>
-    </div>
-  );
-}
-
-function AmberBtn({ onClick, disabled, children, style = {} }) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        width: '100%',
-        padding: '14px 24px',
-        borderRadius: '32px',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        background: disabled ? 'var(--bg-surface)' : 'var(--accent)',
-        border: '1px solid var(--border)',
-        color: disabled ? 'var(--text-muted)' : 'white',
-        fontFamily: 'Inter, sans-serif',
-        fontWeight: 700,
-        fontSize: '14px',
-        letterSpacing: '0.02em',
-        transition: 'var(--transition)',
-        ...style,
-      }}
-      onMouseEnter={(e) => {
-        if (!disabled) e.currentTarget.style.background = 'var(--accent-hover)';
-      }}
-      onMouseLeave={(e) => {
-        if (!disabled) e.currentTarget.style.background = 'var(--accent)';
-      }}
-    >
-      {children}
-    </button>
-  );
-}
+// Icons for UX
+const IcUpload = () => <span style={{ fontSize: '3rem' }}>📄</span>;
+const IcShield = () => <span style={{ fontSize: '1rem' }}>🛡️</span>;
+const IcBrain  = () => <span style={{ fontSize: '2.5rem' }}>🔑</span>;
+const IcBrick  = () => <span style={{ fontSize: '2.5rem' }}>📦</span>;
+const IcGlobe  = () => <span>🌐</span>;
 
 export default function EvzonesStudio() {
-  const { user } = useAuth();
-  const email = user?.email || '';
+  const [file, setFile]                   = useState(null);
+  const [whitelist, setWhitelist]         = useState('');
+  const [email, setEmail]                 = useState('');
+  const [trackingActive, setTrackingActive] = useState(true);
+  const [status, setStatus]               = useState('Standby');
+  const [result, setResult]               = useState(null);   // { assetID, smartAsset }
+  const [history, setHistory]             = useState([]);
+  const [progressMsg, setProgressMsg]     = useState('');
+  const [progressPct, setProgressPct]     = useState(0);
 
-  const [file, setFile] = useState(null);
-  const [wl, setWl] = useState('');
-  const [phase, setPhase] = useState('idle');
-  const [prog, setProg] = useState({ pct: 0, label: '' });
-  const [asset, setAsset] = useState(null);
-  const [hist, setHist] = useState([]);
-  const [err, setErr] = useState('');
-  const [dl, setDl] = useState(false);
+  // Keep smartAsset ref alive for the download click
+  const smartAssetRef = useRef(null);
 
-  const onProg = useCallback((p) => setProg({ pct: p.pct ?? 0, label: p.label ?? '' }), []);
+  const isLocal   = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  const VAULT_URL = (import.meta.env.VITE_VAULT_URL || (isLocal ? 'http://localhost:3001' : window.location.origin)).replace(/\/$/, '');
 
-  const handleProcess = async () => {
-    if (!file) return alert('Select a video file first');
-    if (!email) return alert('Not logged in');
-    setPhase('processing');
-    setErr('');
-    setAsset(null);
+  const handleShieldAsset = async () => {
+    if (!file)  { alert('Please select a video file first'); return; }
+    if (!email) { alert('Please enter your email for security alerts'); return; }
+
     try {
-      setProg({ pct: 0, label: 'Initializing…' });
-      const processed = await processEvzonesVideo(file, onProg);
-      setProg({ pct: 93, label: 'Uploading to vault…' });
-      const sr = await fetch(`${VAULT_URL}/api/save`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          brain: processed.brainB64,
-          segmentCount: processed.segmentCount,
-          whitelist: wl.split(',').map((s) => s.trim()).filter(Boolean),
-          email,
-          fileName: file.name,
-        }),
+      setStatus('PROCESSING');
+      setProgressPct(0);
+      setProgressMsg('Starting…');
+
+      // ── Step 1: Process video client-side (FFmpeg + encrypt to OPFS) ──────
+      const processed = await processEvzonesVideo(file, ({ pct, label }) => {
+        setProgressPct(pct);
+        setProgressMsg(label);
       });
-      if (!sr.ok) {
-        const e = await sr.json().catch(() => ({}));
-        throw new Error(`${sr.status}: ${e.error || sr.statusText}`);
+
+      console.log('[Studio] Processed:', processed.segmentCount, 'segments |',
+        Math.round(processed.brickByteLength / 1024 / 1024), 'MB brick');
+
+      // ── Step 2: Save brain to vault ────────────────────────────────────────
+      setProgressMsg('Saving brain to vault…');
+      setProgressPct(93);
+
+      const saveRes = await fetch(`${VAULT_URL}/api/save`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          brain:        processed.brainB64,
+          segmentCount: processed.segmentCount,
+          whitelist:    whitelist.split(',').map(d => d.trim()).filter(Boolean),
+          email,
+          fileName: file.name
+        })
+      });
+
+      if (!saveRes.ok) {
+        const errBody = await saveRes.json().catch(() => ({}));
+        throw new Error(`Save failed (${saveRes.status}): ${errBody.error || saveRes.statusText}`);
       }
-      const { assetID, ingestToken } = await sr.json();
-      if (!assetID || !ingestToken) throw new Error('Vault returned incomplete response');
-      setProg({ pct: 96, label: 'Building smart asset…' });
-      const result = await generateSmartAsset(processed, assetID, VAULT_URL, ingestToken);
-      setAsset({ ...result, assetID });
-      setPhase('ready');
-      setProg({ pct: 100, label: 'Complete' });
-      setHist((h) => [
-        {
-          name: file.name,
-          size: (file.size / 1048576).toFixed(1) + ' MB',
-          assetID,
-          time: new Date().toLocaleTimeString(),
-        },
-        ...h,
-      ]);
-    } catch (e) {
-      console.error(e);
-      setErr(e.message);
-      setPhase('error');
+
+      const { assetID, ingestToken } = await saveRes.json();
+      if (!assetID)     throw new Error('Server did not return assetID');
+      if (!ingestToken) throw new Error('Server did not return ingestToken — is SEGMENT_MASTER_KEY set?');
+
+      console.log('[Studio] Asset saved:', assetID);
+
+      // ── Step 3: Generate smart asset HTML (vault handshake happens inside) ─
+      setProgressMsg('Vault handshake & wrapping keys…');
+      setProgressPct(96);
+
+      const smartAsset = await generateSmartAsset(processed, assetID, VAULT_URL, ingestToken);
+      smartAssetRef.current = smartAsset;
+
+      setResult({ assetID, smartAsset });
+      setStatus('SUCCESS');
+      setProgressPct(100);
+      setProgressMsg('Done!');
+
+      setHistory(prev => [...prev, {
+        name:    file.name,
+        size:    `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+        time:    new Date().toLocaleTimeString(),
+        assetID
+      }]);
+
+    } catch (err) {
+      console.error('[Studio] Error:', err);
+      setStatus('FAILURE');
+      setProgressMsg('');
+      alert(`Error: ${err.message}`);
     }
   };
 
   const handleDownload = async () => {
-    if (!asset) return;
-    setDl(true);
+    const sa = smartAssetRef.current;
+    if (!sa) return;
     try {
-      await asset.download((p) =>
-        setProg({
-          pct: Math.round((p.written / p.total) * 100),
-          label: `Saving… ${(p.written / 1048576).toFixed(0)}MB / ${(p.total / 1048576).toFixed(0)}MB`,
-        })
-      );
-    } catch (e) {
-      if (e.name !== 'AbortError') alert('Download failed: ' + e.message);
-    } finally {
-      setDl(false);
+      // generateSmartAsset returns { fileName, download, brickOffset }
+      // download() uses showSaveFilePicker (Chrome) or Blob URL (Safari)
+      await sa.download(({ written, total }) => {
+        const pct = Math.round((written / total) * 100);
+        setProgressMsg(`Downloading… ${Math.round(written / 1024 / 1024)}MB / ${Math.round(total / 1024 / 1024)}MB`);
+        setProgressPct(pct);
+      });
+    } catch (err) {
+      if (err.name !== 'AbortError') alert(`Download failed: ${err.message}`);
     }
   };
 
-  const busy = phase === 'processing' || dl;
+  const isProcessing = status === 'PROCESSING';
 
   return (
-    <div style={{ padding: '32px 24px 60px', maxWidth: '1000px', margin: '0 auto' }}>
+    <div className="sentinel-wrapper">
       {/* Header */}
-      <div style={{ marginBottom: '32px' }}>
-        <h1
-          style={{
-            fontFamily: 'Inter, sans-serif',
-            fontSize: 'clamp(24px, 5vw, 32px)',
-            fontWeight: 700,
-            color: 'var(--text-primary)',
-            letterSpacing: '-0.02em',
-            margin: 0,
-          }}
-        >
-          Protect Media
-        </h1>
-        <p style={{ color: 'var(--text-muted)', marginTop: '8px', fontSize: '14px', maxWidth: '560px' }}>
-          Transform your video into a self‑defending asset. All processing is client‑side.
-        </p>
-      </div>
-
-      {/* 3‑column grid */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-          gap: '20px',
-          marginBottom: '24px',
-        }}
-      >
-        {/* Step 1 — Upload */}
-        <Panel style={{ padding: '24px' }}>
-          <h3
-            style={{
-              fontSize: '12px',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              color: 'var(--accent)',
-              marginBottom: '12px',
-            }}
-          >
-            01 / Upload Media
-          </h3>
-          <div
-            onClick={() => !busy && document.getElementById('fi').click()}
-            style={{
-              border: `1px dashed var(--border)`,
-              borderRadius: '12px',
-              padding: '28px 16px',
-              textAlign: 'center',
-              cursor: busy ? 'default' : 'pointer',
-              transition: 'var(--transition)',
-            }}
-            onMouseEnter={(e) => !busy && (e.currentTarget.style.borderColor = 'var(--accent)')}
-            onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
-          >
-            <div style={{ fontSize: '2rem', marginBottom: '10px' }}>{file ? '📁' : '📂'}</div>
-            {file ? (
-              <>
-                <div style={{ fontWeight: 500, color: 'var(--text-primary)', wordBreak: 'break-word' }}>
-                  {file.name}
-                </div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                  {(file.size / 1048576).toFixed(1)} MB
-                </div>
-              </>
-            ) : (
-              <>
-                <div style={{ color: 'var(--text-secondary)', marginBottom: '4px' }}>Click to select video</div>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>MP4 · MOV · MKV — up to 10GB+</div>
-              </>
-            )}
-          </div>
-          <input
-            id="fi"
-            type="file"
-            accept="video/*"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              setFile(e.target.files[0] || null);
-              setPhase('idle');
-              setAsset(null);
-              setErr('');
-            }}
-          />
-        </Panel>
-
-        {/* Step 2 — Configure */}
-        <Panel style={{ padding: '24px' }}>
-          <h3
-            style={{
-              fontSize: '12px',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              color: 'var(--accent)',
-              marginBottom: '12px',
-            }}
-          >
-            02 / Configure
-          </h3>
-          <div style={{ marginBottom: '16px' }}>
-            <label
-              style={{
-                fontSize: '11px',
-                fontWeight: 500,
-                color: 'var(--text-secondary)',
-                display: 'block',
-                marginBottom: '6px',
-              }}
-            >
-              Allowed Domains
-            </label>
-            <input
-              type="text"
-              placeholder="example.com, news.site"
-              value={wl}
-              disabled={busy}
-              onChange={(e) => setWl(e.target.value)}
-              style={{
-                width: '100%',
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--border)',
-                borderRadius: '32px',
-                padding: '10px 16px',
-                color: 'var(--text-primary)',
-                fontSize: '14px',
-                outline: 'none',
-                transition: 'var(--transition)',
-              }}
-              onFocus={(e) => (e.target.style.borderColor = 'var(--accent)')}
-              onBlur={(e) => (e.target.style.borderColor = 'var(--border)')}
-            />
-            <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
-              Comma‑separated. Unauthorized access triggers an alert.
-            </p>
-          </div>
-          <div>
-            <label
-              style={{
-                fontSize: '11px',
-                fontWeight: 500,
-                color: 'var(--text-secondary)',
-                display: 'block',
-                marginBottom: '6px',
-              }}
-            >
-              Owner
-            </label>
-            <div
-              style={{
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--border)',
-                borderRadius: '32px',
-                padding: '10px 16px',
-                fontSize: '13px',
-                color: 'var(--text-secondary)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {email}
-            </div>
-          </div>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(4, 1fr)',
-              gap: '8px',
-              marginTop: '20px',
-            }}
-          >
-            {[
-              ['AES-256', 'Cipher'],
-              ['RSA-2048', 'Handshake'],
-              ['OPFS', 'Storage'],
-              ['SW 206', 'Safari'],
-            ].map(([v, l]) => (
-              <div
-                key={v}
-                style={{
-                  background: 'var(--bg-surface)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '8px',
-                  padding: '8px 4px',
-                  textAlign: 'center',
-                }}
-              >
-                <div style={{ fontWeight: 600, fontSize: '11px', color: 'var(--accent)' }}>{v}</div>
-                <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>{l}</div>
-              </div>
-            ))}
-          </div>
-        </Panel>
-
-        {/* Step 3 — Status */}
-        <Panel style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <h3
-            style={{
-              fontSize: '12px',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              color: 'var(--accent)',
-              marginBottom: '4px',
-            }}
-          >
-            03 / Status
-          </h3>
-          {hist.length === 0 && phase === 'idle' && (
-            <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>No assets protected this session.</p>
-          )}
-          {hist.map((h, i) => (
-            <div
-              key={i}
-              style={{
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--border)',
-                borderRadius: '8px',
-                padding: '10px 12px',
-              }}
-            >
-              <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{h.name}</div>
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                {h.size} · {h.time}
-              </div>
-              <code style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{h.assetID.slice(0, 16)}…</code>
-            </div>
-          ))}
-          {busy && <ProgressBar pct={prog.pct} label={prog.label} />}
-          {phase === 'error' && (
-            <div
-              style={{
-                background: 'rgba(239, 68, 68, 0.1)',
-                border: '1px solid rgba(239, 68, 68, 0.3)',
-                borderRadius: '8px',
-                padding: '10px 12px',
-                fontSize: '12px',
-                color: '#ef4444',
-              }}
-            >
-              ⚠ {err}
-            </div>
-          )}
-        </Panel>
-      </div>
-
-      {/* Execute Panel */}
-      <Panel style={{ padding: '24px', marginBottom: '24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px', marginBottom: '20px', flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '1.6rem' }}>🔑</span>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: '12px', color: 'var(--accent)' }}>BRAIN</div>
-              <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Init segment → vault</div>
-            </div>
-          </div>
-          <div style={{ color: 'var(--text-muted)', fontSize: '20px' }}>→</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '1.6rem' }}>📦</span>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: '12px', color: 'var(--accent)' }}>BRICK</div>
-              <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Encrypted body → OPFS</div>
-            </div>
+      <header className="sentinel-header">
+        <div className="logo-group">
+          <IcShield />
+          <div className="logo-text">
+            <span>EVZONES PROTOCOL</span>
+            <span className="logo-status">ACTIVE DEFENSE</span>
           </div>
         </div>
-        <AmberBtn onClick={handleProcess} disabled={busy || !file || phase === 'ready'}>
-          {phase === 'processing'
-            ? `⏳ ${prog.label || 'Processing…'}`
-            : phase === 'ready'
-            ? '✓ Asset Ready — Download Below'
-            : '⚡ Generate Protected Asset'}
-        </AmberBtn>
-        <p
-          style={{
-            fontSize: '11px',
-            color: 'var(--text-muted)',
-            marginTop: '12px',
-            textAlign: 'center',
-          }}
-        >
-          FFmpeg runs in‑browser · Brick written to OPFS in 8MB chunks · No video data leaves your device
-        </p>
-      </Panel>
+        <nav className="nav-links">
+          {['HOME', 'PROTECT ASSET', 'DASHBOARD', 'DOCUMENTATION', 'ABOUT'].map(link => (
+            <a key={link} href="#" className={link === 'PROTECT ASSET' ? 'active' : ''}>{link}</a>
+          ))}
+        </nav>
+      </header>
 
-      {/* Result Panel */}
-      {phase === 'ready' && asset && (
-        <Panel style={{ padding: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-            <div
-              style={{
-                width: '32px',
-                height: '32px',
-                borderRadius: '50%',
-                background: 'var(--accent-soft)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            </div>
-            <div>
-              <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>Asset Secured</div>
-              <code style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{asset.assetID}</code>
-            </div>
+      <h1 className="main-workflow-title">PROTECT YOUR MEDIA</h1>
+
+      {/* 3-Column Workflow */}
+      <main className="evzones-core-workflow">
+        {/* Step 1: Upload */}
+        <section className="workflow-card upload-zone">
+          <h3>1. UPLOAD YOUR MEDIA</h3>
+          <div className="drop-zone">
+            <IcUpload />
+            <p>drag-and-drop video file<br />or</p>
+            <input
+              type="file"
+              accept="video/mp4, video/x-m4v, video/*"
+              style={{ display: 'none' }}
+              id="fileInput"
+              onChange={(e) => { setFile(e.target.files[0]); setResult(null); setStatus('Standby'); }}
+            />
+            <label htmlFor="fileInput" className="choose-file-btn">
+              {file ? file.name : 'CHOOSE FILE'}
+            </label>
+            <p className="formats-hint">SELECT FILE (MP4, MOV…)</p>
           </div>
-          <div
-            style={{
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border)',
-              borderRadius: '12px',
-              padding: '12px 14px',
-              marginBottom: '20px',
-              fontSize: '12px',
-              color: 'var(--text-secondary)',
-              lineHeight: 1.6,
-            }}
-          >
-            The downloaded .html file is a self‑contained asset. The encrypted video is appended after the HTML
-            closing tag as raw binary. The player reads its own source via Range requests, caches in OPFS, then the
-            Service Worker serves it with AES‑CTR decryption.
+        </section>
+
+        {/* Step 2: Configure */}
+        <section className="workflow-card configure-section">
+          <h3>2. CONFIGURE PROTECTION</h3>
+
+          <div className="input-block">
+            <label><IcGlobe /> ALLOWED DOMAINS (comma separated):</label>
+            <input
+              type="text"
+              placeholder="example.com, sports-news.co"
+              value={whitelist}
+              onChange={(e) => setWhitelist(e.target.value)}
+            />
           </div>
-          {dl && <ProgressBar pct={prog.pct} label={prog.label} />}
-          <AmberBtn onClick={handleDownload} disabled={dl}>
-            {dl ? `⏳ Saving…` : `⬇ Download ${asset.fileName}`}
-          </AmberBtn>
-          <p
-            style={{
-              fontSize: '10px',
-              color: 'var(--text-muted)',
-              marginTop: '10px',
-              textAlign: 'center',
-            }}
+
+          <div className="input-block">
+            <label>ALERT EMAIL:</label>
+            <input
+              type="email"
+              placeholder="security@protocol.io"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
+
+          <div className="toggle-block">
+            <div className="toggle-switch">
+              <input type="checkbox" checked={trackingActive} onChange={() => setTrackingActive(!trackingActive)} id="tracking" />
+              <label htmlFor="tracking"></label>
+            </div>
+            <span>ACTIVATE REAL-TIME TRACKING</span>
+          </div>
+        </section>
+
+        {/* Status Feed */}
+        <aside className="workflow-card live-status-card">
+          <h3><span className="live-dot"></span>Live Protection Status</h3>
+          <div className="status-feed">
+            {history.length > 0 ? history.map((entry, i) => (
+              <div key={i} className="feed-entry">
+                Protected "{entry.name}" ({entry.size}) at {entry.time}.<br />
+                Asset ID: <code>{entry.assetID}</code>
+              </div>
+            )) : <p className="feed-empty">Standby. No assets processed in this session.</p>}
+          </div>
+        </aside>
+      </main>
+
+      {/* Binary Split Visualization & Execute */}
+      <div className="split-execution-area">
+        <div className="split-visuals">
+          <div className="split-asset brain-icon">
+            <IcBrain />
+            <div className="split-label">Key/Moov ID ("Brain")</div>
+          </div>
+          <div className="split-flow-arrow">---&gt;</div>
+          <div className="split-asset brick-icon">
+            <IcBrick />
+            <div className="split-label">Protected.mp4 "Brick"</div>
+          </div>
+        </div>
+
+        <section className="execute-section">
+          <h3>3. SECURE &amp; LOBOTOMIZE</h3>
+
+          {/* Progress bar */}
+          {isProcessing && (
+            <div style={{ marginBottom: '12px' }}>
+              <div className="progress-bar-bg">
+                <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
+              </div>
+              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '6px' }}>
+                {progressPct}% — {progressMsg}
+              </p>
+            </div>
+          )}
+
+          <button
+            className={`generate-btn ${isProcessing ? 'loading' : ''}`}
+            onClick={handleShieldAsset}
+            disabled={isProcessing || !file}
           >
-            Chrome/Edge: streams to disk with zero RAM overhead · Safari: assembles in memory
+            {isProcessing ? 'PROCESSING IN BROWSER…' : 'GENERATE PROTECTED ASSET'}
+            <span className="spinner"></span>
+          </button>
+          <p className="browser-processing-hint">
+            Video is encrypted entirely in your browser using FFmpeg.wasm + WebCrypto.
+            Only the moov header (~10KB) is sent to the vault.
           </p>
-        </Panel>
+          {status === 'FAILURE' && (
+            <p style={{ color: '#e74c3c', marginTop: '10px' }}>
+              ❌ Processing failed. Check console for details.
+            </p>
+          )}
+        </section>
+      </div>
+
+      {/* Result Download */}
+      {result && (
+        <div className="result-download-panel">
+          <div>
+            ✅ Asset Secured! Your <strong>Self-Protecting Video</strong> is ready.<br />
+            <small>Asset ID: {result.assetID}</small><br />
+            <small style={{ opacity: 0.7 }}>File: {result.smartAsset?.fileName}</small>
+          </div>
+          <button onClick={handleDownload}>
+            DOWNLOAD SMART ASSET (.HTML)
+          </button>
+        </div>
       )}
+
+      <style>{`
+        .sentinel-wrapper {
+          max-width: 1400px;
+          margin: 0 auto;
+          padding: 20px;
+        }
+        .sentinel-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          background-color: var(--panel-dark);
+          border-radius: 8px;
+          padding: 18px 25px;
+          margin-bottom: 30px;
+          border: 1px solid rgba(255,255,255,0.03);
+        }
+        .logo-group { display: flex; align-items: center; gap: 12px; }
+        .logo-text { display: flex; flex-direction: column; line-height: 1.3; }
+        .logo-text span:first-child { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; }
+        .logo-status { font-size: 0.65rem; color: var(--evzones-green); text-transform: uppercase; letter-spacing: 0.5px; }
+        .nav-links { display: flex; gap: 30px; }
+        .nav-links a { color: var(--text-muted); text-decoration: none; font-size: 0.85rem; font-weight: 600; position: relative; transition: 0.3s; }
+        .nav-links a:hover, .nav-links a.active { color: var(--text-main); }
+        .nav-links a.active::after { content: ''; position: absolute; bottom: -5px; left: 0; right: 0; height: 2px; background-color: var(--evzones-blue); }
+        .main-workflow-title { text-align: center; color: var(--text-main); margin-bottom: 30px; font-size: 2.2rem; font-weight: 800; letter-spacing: 1px; }
+        .evzones-core-workflow { display: grid; grid-template-columns: 1fr 1fr 0.8fr; gap: 20px; margin-bottom: 40px; }
+        .workflow-card { background-color: var(--panel-dark); border-radius: 8px; padding: 25px; border: 1px solid rgba(255,255,255,0.03); box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+        .workflow-card h3 { margin: 0 0 20px; font-size: 1rem; color: var(--text-main); font-weight: 600; }
+        .drop-zone { border: 2px dashed rgba(255,255,255,0.08); border-radius: 6px; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 60px 20px; text-align: center; color: var(--text-muted); background-color: rgba(0,0,0,0.1); }
+        .drop-zone p { margin: 15px 0; font-size: 0.85rem; }
+        .choose-file-btn { background-color: #2c3e50; border: 1px solid #34495e; padding: 10px 20px; border-radius: 4px; color: white; font-weight: 600; cursor: pointer; font-size: 0.9rem; }
+        .choose-file-btn:hover { background-color: #34495e; }
+        .formats-hint { font-size: 0.75rem !important; margin-top: 5px; opacity: 0.6; }
+        .input-block { margin-bottom: 20px; }
+        .input-block label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; }
+        .input-block input { width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.08); padding: 12px; border-radius: 4px; color: white; outline: none; box-sizing: border-box; }
+        .toggle-block { display: flex; align-items: center; gap: 12px; margin-top: 20px; font-size: 0.8rem; color: var(--text-muted); }
+        .toggle-switch input { display: none; }
+        .toggle-switch label { display: block; width: 40px; height: 20px; background-color: rgba(255,255,255,0.08); border-radius: 10px; position: relative; cursor: pointer; }
+        .toggle-switch label:after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; background: #4a5a6b; border-radius: 50%; transition: 0.3s; }
+        .toggle-switch input:checked + label:after { background: var(--evzones-blue); left: 22px; }
+        .live-dot { display: inline-block; width: 10px; height: 10px; background-color: var(--evzones-green); border-radius: 50%; margin-right: 8px; box-shadow: 0 0 10px var(--evzones-green); }
+        .status-feed { font-size: 0.8rem; color: var(--text-muted); max-height: 250px; overflow-y: auto; }
+        .feed-entry { margin-bottom: 15px; line-height: 1.6; }
+        .feed-entry code { background: rgba(0,255,0,0.1); padding: 2px 6px; border-radius: 3px; font-family: monospace; font-size: 0.75rem; }
+        .split-execution-area { display: flex; justify-content: center; align-items: flex-start; gap: 30px; padding: 0 20px; }
+        .split-visuals { display: flex; align-items: center; gap: 15px; padding: 10px 20px; background-color: var(--panel-dark); border-radius: 6px; border: 1px solid rgba(255,255,255,0.03); }
+        .split-asset { display: flex; flex-direction: column; align-items: center; text-align: center; }
+        .brain-icon { color: #f1c40f; }
+        .brick-icon { color: #e74c3c; }
+        .split-label { font-size: 0.7rem; color: var(--text-muted); margin-top: 5px; font-weight: 600; }
+        .split-flow-arrow { font-family: monospace; color: var(--text-muted); font-size: 1.2rem; }
+        .execute-section { background-color: var(--panel-dark); border-radius: 8px; padding: 25px; border: 1px solid rgba(255,255,255,0.03); box-shadow: 0 10px 30px rgba(0,0,0,0.1); width: 400px; }
+        .execute-section h3 { margin: 0 0 20px; font-size: 1rem; color: var(--text-main); font-weight: 600; }
+        .progress-bar-bg { background: rgba(255,255,255,0.06); border-radius: 4px; height: 6px; overflow: hidden; }
+        .progress-bar-fill { height: 100%; background: var(--evzones-blue); border-radius: 4px; transition: width 0.3s ease; }
+        .generate-btn { width: 100%; background-color: var(--evzones-blue); border: none; color: white; padding: 15px; border-radius: 4px; font-weight: 700; font-size: 1rem; cursor: pointer; position: relative; transition: 0.3s; }
+        .generate-btn:hover:not(:disabled) { background-color: #0077d7; }
+        .generate-btn:disabled { background-color: rgba(255,255,255,0.1); color: rgba(255,255,255,0.3); cursor: not-allowed; }
+        .spinner { display: none; width: 20px; height: 20px; border: 3px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; position: absolute; right: 15px; top: calc(50% - 13px); animation: spin 1s linear infinite; }
+        .generate-btn.loading .spinner { display: block; }
+        .browser-processing-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 10px; line-height: 1.6; }
+        .result-download-panel { margin-top: 30px; background-color: var(--evzones-green); color: #000; padding: 20px; border-radius: 8px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+        .result-download-panel button { background-color: black; color: white; border: none; padding: 12px 24px; border-radius: 4px; font-weight: 600; cursor: pointer; }
+        .result-download-panel button:hover { background-color: #222; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
     </div>
   );
 }
