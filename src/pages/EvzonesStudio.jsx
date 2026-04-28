@@ -1,5 +1,7 @@
-// src/pages/EvzonesStudio.jsx — Modern theme, preserves all FFmpeg/vault logic
-import React, { useState, useCallback } from 'react';
+// src/pages/EvzonesStudio.jsx
+// Modern theme, two‑file output, copy‑paste embed snippet, sanitised filenames.
+
+import React, { useState, useCallback, useRef } from 'react';
 import { processEvzonesVideo, generateSmartAsset } from '../utils/evzonesEngine';
 import { useAuth } from '../context/AuthContext';
 
@@ -94,12 +96,12 @@ export default function EvzonesStudio() {
 
   const [file, setFile] = useState(null);
   const [wl, setWl] = useState('');
-  const [phase, setPhase] = useState('idle');
+  const [phase, setPhase] = useState('idle');   // idle | processing | ready | error
   const [prog, setProg] = useState({ pct: 0, label: '' });
-  const [asset, setAsset] = useState(null);
+  const [asset, setAsset] = useState(null);      // { fileName, brickFileName, assetID, html, downloadBrick }
   const [hist, setHist] = useState([]);
   const [err, setErr] = useState('');
-  const [dl, setDl] = useState(false);
+  const [dl, setDl] = useState(false);           // true while brick download is in progress
 
   const onProg = useCallback((p) => setProg({ pct: p.pct ?? 0, label: p.label ?? '' }), []);
 
@@ -132,14 +134,14 @@ export default function EvzonesStudio() {
       if (!assetID || !ingestToken) throw new Error('Vault returned incomplete response');
       setProg({ pct: 96, label: 'Building smart asset…' });
       const result = await generateSmartAsset(processed, assetID, VAULT_URL, ingestToken);
-      setAsset({ ...result, assetID });
+      setAsset(result);
       setPhase('ready');
       setProg({ pct: 100, label: 'Complete' });
       setHist((h) => [
         {
           name: file.name,
           size: (file.size / 1048576).toFixed(1) + ' MB',
-          assetID,
+          assetID: assetID,
           time: new Date().toLocaleTimeString(),
         },
         ...h,
@@ -151,24 +153,12 @@ export default function EvzonesStudio() {
     }
   };
 
-  const handleDownload = async () => {
-    if (!asset) return;
-    setDl(true);
-    try {
-      await asset.download((p) =>
-        setProg({
-          pct: Math.round((p.written / p.total) * 100),
-          label: `Saving… ${(p.written / 1048576).toFixed(0)}MB / ${(p.total / 1048576).toFixed(0)}MB`,
-        })
-      );
-    } catch (e) {
-      if (e.name !== 'AbortError') alert('Download failed: ' + e.message);
-    } finally {
-      setDl(false);
-    }
-  };
-
   const busy = phase === 'processing' || dl;
+
+  // Generate embed code snippet
+  const embedSnippet = asset
+    ? `<iframe src="./${asset.fileName}" width="800" height="450" allow="autoplay; encrypted-media; service-worker" allowfullscreen></iframe>`
+    : '';
 
   return (
     <div style={{ padding: '32px 24px 60px', maxWidth: '1000px', margin: '0 auto' }}>
@@ -457,9 +447,9 @@ export default function EvzonesStudio() {
         </p>
       </Panel>
 
-      {/* Result Panel */}
+      {/* ── Result Panel (two separate downloads + embed snippet) ── */}
       {phase === 'ready' && asset && (
-        <Panel style={{ padding: '24px' }}>
+        <Panel style={{ padding: '24px', marginBottom: '24px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
             <div
               style={{
@@ -481,6 +471,7 @@ export default function EvzonesStudio() {
               <code style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{asset.assetID}</code>
             </div>
           </div>
+
           <div
             style={{
               background: 'var(--bg-surface)',
@@ -493,23 +484,110 @@ export default function EvzonesStudio() {
               lineHeight: 1.6,
             }}
           >
-            The downloaded .html file is a self‑contained asset. The encrypted video is appended after the HTML
-            closing tag as raw binary. The player reads its own source via Range requests, caches in OPFS, then the
-            Service Worker serves it with AES‑CTR decryption.
+            Your asset consists of <strong>two files</strong> that must be placed in the same folder on your web server:
+            <br />
+            <code style={{ color: 'var(--accent)' }}>📄 {asset.fileName}</code> – the player page
+            <br />
+            <code style={{ color: 'var(--accent)' }}>📦 {asset.brickFileName}</code> – the encrypted video body
+            <br /><br />
+            <em>No video data is stored on our servers. You host the .brick file yourself for zero bandwidth cost.</em>
           </div>
-          {dl && <ProgressBar pct={prog.pct} label={prog.label} />}
-          <AmberBtn onClick={handleDownload} disabled={dl}>
-            {dl ? `⏳ Saving…` : `⬇ Download ${asset.fileName}`}
-          </AmberBtn>
+
+          {/* Two download buttons */}
+          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '16px' }}>
+            <AmberBtn
+              onClick={async () => {
+                try {
+                  const htmlBlob = new Blob([asset.html], { type: 'text/html' });
+                  if (window.showSaveFilePicker) {
+                    const handle = await window.showSaveFilePicker({
+                      suggestedName: asset.fileName,
+                      types: [{ description: 'Evzones Player', accept: { 'text/html': ['.html'] } }],
+                    });
+                    const ws = await handle.createWritable();
+                    await ws.write(htmlBlob);
+                    await ws.close();
+                  } else {
+                    const url = URL.createObjectURL(htmlBlob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = asset.fileName;
+                    a.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 60000);
+                  }
+                } catch (e) {
+                  // user cancelled
+                }
+              }}
+              style={{ flex: 1, minWidth: '200px' }}
+            >
+              📄 Download Player (HTML)
+            </AmberBtn>
+
+            <AmberBtn
+              onClick={() => {
+                setDl(true);
+                asset
+                  .downloadBrick((p) => {
+                    // optional progress
+                  })
+                  .finally(() => setDl(false));
+              }}
+              disabled={dl}
+              style={{ flex: 1, minWidth: '200px' }}
+            >
+              {dl ? '⏳ Saving brick…' : '📦 Download Video Data (Brick)'}
+            </AmberBtn>
+          </div>
+
+          {/* Embed snippet */}
+          <div style={{ marginTop: '16px' }}>
+            <label
+              style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                color: 'var(--accent)',
+                display: 'block',
+                marginBottom: '8px',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              📋 Embed Code (copy & paste into your site)
+            </label>
+            <textarea
+              readOnly
+              value={embedSnippet}
+              onClick={(e) => e.target.select()}
+              style={{
+                width: '100%',
+                minHeight: '60px',
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                padding: '10px 14px',
+                color: 'var(--text-primary)',
+                fontFamily: 'monospace',
+                fontSize: '12px',
+                resize: 'vertical',
+                outline: 'none',
+                cursor: 'pointer',
+              }}
+            />
+            <p style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '6px' }}>
+              This iframe will work on the same domain as your asset files. For best compatibility, link directly to the HTML file.
+            </p>
+          </div>
+
           <p
             style={{
               fontSize: '10px',
               color: 'var(--text-muted)',
-              marginTop: '10px',
+              marginTop: '16px',
               textAlign: 'center',
             }}
           >
-            Chrome/Edge: streams to disk with zero RAM overhead · Safari: assembles in memory
+            Upload both files to the same directory on your web server. The player will automatically find the brick.
           </p>
         </Panel>
       )}
