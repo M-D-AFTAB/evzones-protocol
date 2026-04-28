@@ -358,185 +358,41 @@ function buildHtml({ fileName, assetID, vaultUrl, codec, audioCodec,
 
 // Inside buildHtml, replace the SW_CODE constant with this:
 
-const SW_CODE = `
-const assets = new Map();
-
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
-
-self.addEventListener('message', async (event) => {
-  const msg = event.data || {};
-  const port = event.ports[0];
-  if (msg.type === 'REGISTER_ASSET') {
-    try {
-      await registerAsset(msg);
-      port?.postMessage({ ok: true });
-    } catch (err) {
-      port?.postMessage({ error: err.message });
-    }
-  }
-});
-
-async function registerAsset(msg) {
-  const brainU8 = b64ToU8(msg.brainB64);
-  const baseIV = hexToU8(msg.baseIVHex);
-  const cryptoKeys = await Promise.all(
-    msg.tempKeys.map(hex =>
-      crypto.subtle.importKey('raw', hexToU8(hex), { name: 'AES-CTR' }, false, ['decrypt'])
-    )
-  );
-  assets.set(msg.id, {
-    brainU8,
-    cryptoKeys,
-    baseIV,
-    segmentSize: msg.segmentSize,
-    segmentCount: msg.segmentCount,
-    brickUrl: msg.brickUrl,
-    mimeType: msg.mimeType,
-    _totalBytes: null,
-  });
-}
-
-self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
-  if (!url.pathname.startsWith('/sw-video/')) return;
-  event.respondWith(handleVideoRequest(event.request, url));
-});
-
-async function handleVideoRequest(request, url) {
-  const assetID = url.pathname.slice('/sw-video/'.length).replace(/\\.mp4$/, '');
-  const asset = assets.get(assetID);
-  if (!asset) return new Response('Asset not registered', { status: 404 });
-
-  const { brainU8, mimeType } = asset;
-  const brainLen = brainU8.byteLength;
-
-  if (!asset._totalBytes) {
-    const headResp = await fetch(asset.brickUrl, { method: 'HEAD' });
-    if (!headResp.ok) throw new Error('Brick not accessible');
-    const brickLen = Number(headResp.headers.get('Content-Length'));
-    asset._totalBytes = brainLen + brickLen;
-  }
-
-  const totalBytes = asset._totalBytes;
-
-  if (request.method === 'HEAD') {
-    return new Response(null, { status: 200, headers: makeHeaders(mimeType, totalBytes, null) });
-  }
-
-  const rangeHeader = request.headers.get('range');
-  let start = 0, end = totalBytes - 1, isRange = false;
-  if (rangeHeader) {
-    isRange = true;
-    const m = rangeHeader.match(/^bytes=(\\d+)-(\\d*)$/);
-    if (!m) return new Response('Range Not Satisfiable', { status: 416 });
-    start = parseInt(m[1]);
-    end = m[2] !== '' ? parseInt(m[2]) : totalBytes - 1;
-    if (start >= totalBytes) return new Response('Range Not Satisfiable', { status: 416 });
-    end = Math.min(end, totalBytes - 1);
-  }
-
-  const length = end - start + 1;
-  const stream = buildStream(asset, start, end);
-
-  return new Response(stream, {
-    status: isRange ? 206 : 200,
-    headers: makeHeaders(mimeType, length, isRange ? \`bytes \${start}-\${end}/\${totalBytes}\` : null),
-  });
-}
-
-function makeHeaders(mimeType, len, contentRange) {
-  const h = new Headers({
-    'Content-Type': mimeType,
-    'Content-Length': String(len),
-    'Accept-Ranges': 'bytes',
-    'Cache-Control': 'no-store',
-  });
-  if (contentRange) h.set('Content-Range', contentRange);
-  return h;
-}
-
-function buildStream(asset, vStart, vEnd) {
-  const { brainU8, cryptoKeys, baseIV, segmentSize, brickUrl } = asset;
-  const brainLen = brainU8.byteLength;
-
-  return new ReadableStream({
-    async start(controller) {
-      try {
-        let pos = vStart;
-        if (pos <= vEnd && pos < brainLen) {
-          controller.enqueue(brainU8.slice(pos, Math.min(vEnd + 1, brainLen)));
-          pos = Math.min(vEnd + 1, brainLen);
-        }
-        if (pos <= vEnd && pos >= brainLen) {
-          const brickStart = pos - brainLen;
-          const brickEnd = vEnd - brainLen;
-          const firstSeg = Math.floor(brickStart / segmentSize);
-          const lastSeg = Math.floor(brickEnd / segmentSize);
-          for (let si = firstSeg; si <= lastSeg; si++) {
-            const segEncStart = si * segmentSize;
-            const segEncEnd = Math.min(segEncStart + segmentSize, Number.MAX_SAFE_INTEGER) - 1;
-            const rangeInSegStart = Math.max(brickStart, segEncStart);
-            const rangeInSegEnd = Math.min(brickEnd, segEncEnd);
-            const offsetInSeg = rangeInSegStart - segEncStart;
-            const blockIndex = Math.floor(offsetInSeg / 16);
-            const skippedBytes = offsetInSeg % 16;
-            const counter = addToIV(makeSegmentIV(baseIV, si), blockIndex);
-            const fetchStart = segEncStart + blockIndex * 16;
-            const fetchEnd = segEncEnd;
-            const resp = await fetch(brickUrl, { headers: { Range: \`bytes=\${fetchStart}-\${fetchEnd}\` } });
-            if (!resp.ok && resp.status !== 206) throw new Error('Brick fetch failed');
-            const encBuf = await resp.arrayBuffer();
-            const decBuf = await crypto.subtle.decrypt(
-              { name: 'AES-CTR', counter, length: 128 },
-              cryptoKeys[si],
-              encBuf
-            );
-            const wantedBytes = rangeInSegEnd - rangeInSegStart + 1;
-            controller.enqueue(new Uint8Array(decBuf, skippedBytes, wantedBytes));
-          }
-        }
-        controller.close();
-      } catch (err) { controller.error(err); }
-    },
-  });
-}
-
-function makeSegmentIV(baseIV, segIdx) {
-  const iv = new Uint8Array(16);
-  iv.set(baseIV.slice(0, 8), 0);
-  let n = segIdx;
-  for (let b = 15; b >= 8 && n > 0; b--) {
-    iv[b] = n & 0xff;
-    n = Math.floor(n / 256);
-  }
-  return iv;
-}
-
-function addToIV(iv, delta) {
-  const out = new Uint8Array(iv);
-  let carry = delta;
-  for (let b = 15; b >= 0 && carry > 0; b--) {
-    const sum = out[b] + (carry & 0xff);
-    out[b] = sum & 0xff;
-    carry = Math.floor(carry / 256) + (sum >> 8);
-  }
-  return out;
-}
-
-function b64ToU8(b64) {
-  const bin = atob(b64.replace(/\\s/g, ''));
-  const u8 = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  return u8;
-}
-
-function hexToU8(hex) {
-  const u8 = new Uint8Array(hex.length >> 1);
-  for (let i = 0; i < hex.length; i += 2) u8[i >> 1] = parseInt(hex.substr(i, 2), 16);
-  return u8;
-}
-`;
+// ── Service Worker script (plain string, no backticks) ──
+const SW_CODE = String.raw`self.addEventListener('install',function(){self.skipWaiting()});` +
+`self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});` +
+`self.addEventListener('message',function(e){var p=e.ports[0],m=e.data;if(m&&m.type==='REGISTER_ASSET'){` +
+  `registerAsset(m).then(function(){p.postMessage({ok:true})}).catch(function(x){p.postMessage({error:x.message})});}});` +
+`var assets=new Map();` +
+`async function registerAsset(m){` +
+  `var b=await crypto.subtle.importKey('raw',hex2u8(m.tempKeys[0]),{name:'AES-CTR'},false,['decrypt']);` +
+  `assets.set(m.id,{brainU8:b64_2_u8(m.brainB64),cryptoKeys:[b],baseIV:hex2u8(m.baseIVHex),segmentSize:m.segmentSize,` +
+  `segmentCount:m.segmentCount,brickUrl:m.brickUrl,mimeType:m.mimeType,_totalBytes:null});}` +
+`function b64_2_u8(s){var b=atob(s.replace(/\\s/g,'')),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}` +
+`function hex2u8(h){var u=new Uint8Array(h.length>>1);for(var i=0;i<h.length;i+=2)u[i>>1]=parseInt(h.substr(i,2),16);return u;}` +
+`self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(!u.pathname.startsWith('/sw-video/'))return;e.respondWith(handleRequest(e.request,u));});` +
+`async function handleRequest(req,url){` +
+  `var id=url.pathname.slice('/sw-video/'.length).replace(/\\.mp4$/,''),a=assets.get(id);if(!a)return new Response('Not found',{status:404});` +
+  `var bl=a.brainU8.byteLength,range=req.headers.get('range'),start=0,end=a._totalBytes-1,isR=false;` +
+  `if(!a._totalBytes){var hr=await fetch(a.brickUrl,{method:'HEAD'});if(!hr.ok)throw new Error('Brick missing');` +
+    `a._totalBytes=bl+Number(hr.headers.get('Content-Length'));}` +
+  `var total=a._totalBytes;if(req.method==='HEAD')return new Response(null,{status:200,headers:hdrs(a.mimeType,total,null)});` +
+  `if(range){isR=true;var m=range.match(/^bytes=(\\d+)-(\\d*)$/);if(!m)return new Response('Range error',{status:416});` +
+    `start=parseInt(m[1]);end=m[2]!==''?parseInt(m[2]):total-1;if(start>=total)return new Response('Range error',{status:416});end=Math.min(end,total-1);}` +
+  `var len=end-start+1,st=buildStream(a,start,end);return new Response(st,{status:isR?206:200,headers:hdrs(a.mimeType,len,isR?\\\`bytes \\\${start}-\\\${end}/\\\${total}\\\`:null)});}` +
+`function hdrs(mime,len,cr){var h=new Headers({'Content-Type':mime,'Content-Length':String(len),'Accept-Ranges':'bytes','Cache-Control':'no-store'});if(cr)h.set('Content-Range',cr);return h;}` +
+`function buildStream(a,vs,ve){var bl=a.brainU8.byteLength;return new ReadableStream({start:async function(c){` +
+  `try{var p=vs;if(p<=ve&&p<bl){c.enqueue(a.brainU8.slice(p,Math.min(ve+1,bl)));p=Math.min(ve+1,bl);}` +
+  `if(p<=ve&&p>=bl){var bs=p-bl,be=ve-bl,fs=Math.floor(bs/a.segmentSize),ls=Math.floor(be/a.segmentSize);` +
+  `for(var si=fs;si<=ls;si++){var segS=si*a.segmentSize,segE=Math.min(segS+a.segmentSize,Number.MAX_SAFE_INTEGER)-1,` +
+    `ris=Math.max(bs,segS),rie=Math.min(be,segE),off=ris-segS,bi=Math.floor(off/16),sk=off%16,` +
+    `ctr=addIV(makeIV(a.baseIV,si),bi),fS=segS+bi*16,fE=segE;` +
+    `var resp=await fetch(a.brickUrl,{headers:{Range:'bytes='+fS+'-'+fE}});if(!resp.ok&&resp.status!==206)throw new Error('Brick fetch');` +
+    `var eb=await resp.arrayBuffer(),db=await crypto.subtle.decrypt({name:'AES-CTR',counter:ctr,length:128},a.cryptoKeys[si],eb),` +
+    `wb=rie-ris+1;c.enqueue(new Uint8Array(db,sk,wb));}}` +
+  `c.close()}catch(x){c.error(x)}}});}` +
+`function makeIV(bv,si){var iv=new Uint8Array(16);iv.set(bv.slice(0,8),0);var n=si;for(var i=15;i>=8&&n>0;i--){iv[i]=n&0xff;n=Math.floor(n/256);}return iv;}` +
+`function addIV(iv,d){var o=new Uint8Array(iv),c=d;for(var i=15;i>=0&&c>0;i--){var s=o[i]+(c&0xff);o[i]=s&0xff;c=Math.floor(c/256)+(s>>8);}return o;}`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -615,7 +471,8 @@ async function decryptKeyBlob(tkHex){ /* ... */ }
 // ── In‑page Service Worker registration ──
 async function ensureSW(){
     if(!('serviceWorker' in navigator)) throw new Error('SW not supported');
-    var swBlob = new Blob([String.raw\`${SW_CODE}\`], {type: 'application/javascript'});
+    var swCode = ${JSON.stringify(SW_CODE)};   // embed SW_CODE as a JSON string
+    var swBlob = new Blob([swCode], {type: 'application/javascript'});
     var swUrl = URL.createObjectURL(swBlob);
     var reg = await navigator.serviceWorker.register(swUrl, {scope: './'});
     if (reg.active) return;
