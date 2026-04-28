@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import worldMapUrl from '../assets/World_map.svg';
+import GemmaChat from '../components/GemmaChat';
+
 
 const VAULT_URL = (() => {
   if (import.meta.env.VITE_VAULT_URL) return import.meta.env.VITE_VAULT_URL;
@@ -44,7 +46,7 @@ async function geoIP(ip) {
       geoCache[ip] = { lat: d.latitude, lon: d.longitude, city: d.city, country: d.country_name };
       return geoCache[ip];
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -117,8 +119,8 @@ function AssetCard({ asset, onTrack, onKill }) {
             background: asset.killed
               ? 'rgba(239, 68, 68, 0.1)'
               : live > 0
-              ? 'var(--accent-soft)'
-              : 'var(--bg-surface)',
+                ? 'var(--accent-soft)'
+                : 'var(--bg-surface)',
             color: asset.killed ? '#ef4444' : 'var(--accent)',
           }}
         >
@@ -270,7 +272,7 @@ function TrackingModal({ asset, onClose, onKill }) {
     try {
       const r = await fetch(`${VAULT_URL}/api/dashboard/asset?id=${asset.id}`);
       if (r.ok) setData(await r.json());
-    } catch {}
+    } catch { }
   }, [asset.id]);
 
   useEffect(() => {
@@ -648,7 +650,7 @@ export default function Dashboard() {
           <AssetCard key={asset.id} asset={asset} onTrack={setTrack} onKill={handleKill} />
         ))}
       </div>
-
+      <GemmaChat />
       {/* Tracking Modal */}
       {tracking && (
         <TrackingModal asset={tracking} onClose={() => setTrack(null)} onKill={handleKill} />
